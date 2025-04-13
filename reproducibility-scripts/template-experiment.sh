@@ -1,1 +1,1 @@
-python -m template_package_name.template_experiment
+python -m neuromata.template_experiment

@@ -1,12 +1,12 @@
 runai submit \
   --name example-minimal \
   --interactive \
-  --image registry.rcp.epfl.ch/claire/moalla/template-project-name:amd64-cuda-moalla-latest \
+  --image registry.rcp.epfl.ch/claire/moalla/neuromata:amd64-cuda-moalla-latest \
   --pvc runai-claire-moalla-scratch:/claire-rcp-scratch \
-  --working-dir /claire-rcp-scratch/home/moalla/template-project-name/dev \
-  -e PROJECT_ROOT_AT=/claire-rcp-scratch/home/moalla/template-project-name/dev \
-  -e PROJECT_NAME=template-project-name \
-  -e PACKAGE_NAME=template_package_name \
+  --working-dir /claire-rcp-scratch/home/moalla/neuromata/dev \
+  -e PROJECT_ROOT_AT=/claire-rcp-scratch/home/moalla/neuromata/dev \
+  -e PROJECT_NAME=neuromata \
+  -e PACKAGE_NAME=neuromata \
   -g 1 --cpu 8 --cpu-limit 8 --memory 64G --memory-limit 64G \
   -- sleep infinity
 
