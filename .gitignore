@@ -150,3 +150,6 @@ third-party
 
 # vscode
 .vscode
+
+# dkfz
+logs
