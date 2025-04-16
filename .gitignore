@@ -147,3 +147,6 @@ wandb
 **/*.out
 
 third-party
+
+# vscode
+.vscode

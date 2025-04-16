@@ -6,6 +6,8 @@ import keras
 import matplotlib.pyplot as pl
 import numpy as np
 import tensorflow as tf
+print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
+
 import wandb
 from omegaconf import OmegaConf
 
@@ -30,8 +32,8 @@ class LogConfig:
 
 @dataclass
 class CAConfig:
-    channel_n = 16
-    cell_fire_rate = 0.5
+    channel_n: int = 16
+    cell_fire_rate: float = 0.5
 
 
 @dataclass
@@ -145,11 +147,15 @@ def train(cfg: TrainConfig):
 
 def main():
 
-    # cfg = OmegaConf.load("configs/train.yaml")
-    # cfg = OmegaConf.merge(TrainConfig(), cfg)
+    cli_args = OmegaConf.from_cli()
+    file_cfg = OmegaConf.load(cli_args.config)
+    # We remove 'config' attribute from config as the underlying DataClass does not have it
+    del cli_args.config
 
     default_cfg = OmegaConf.structured(TrainConfig())
-    cfg = OmegaConf.to_object(default_cfg)
+    cfg = OmegaConf.merge(default_cfg, file_cfg, cli_args)
+    # convert structured config back to underlying dataclass
+    cfg = OmegaConf.to_object(cfg)
 
     train(cfg=cfg)
 
