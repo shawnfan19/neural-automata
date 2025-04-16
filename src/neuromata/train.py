@@ -3,7 +3,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
 import keras
-import matplotlib.pylab as pl
+import matplotlib.pyplot as pl
 import numpy as np
 import tensorflow as tf
 import wandb
