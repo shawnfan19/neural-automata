@@ -1,11 +1,19 @@
 import json
+from dataclasses import dataclass
 
 import keras
 import numpy as np
 import tensorflow as tf
 from google.protobuf.json_format import MessageToDict
-from keras.api.layers import Conv2D
+from keras.api.layers import Conv2D, GlobalAveragePooling2D
 from tensorflow.python.framework import convert_to_constants
+
+
+@dataclass
+class CAConfig:
+    channel_n: int = 16
+    color_channel_n: int = 3
+    cell_fire_rate: float = 0.5
 
 
 def get_living_mask(x):
@@ -15,10 +23,11 @@ def get_living_mask(x):
 
 class CAModel(keras.Model):
 
-    def __init__(self, channel_n, fire_rate):
+    def __init__(self, cfg: CAConfig):
         super().__init__()
-        self.channel_n = channel_n
-        self.fire_rate = fire_rate
+        self.channel_n = cfg.channel_n
+        self.fire_rate = cfg.cell_fire_rate
+        self.color_channel_n = cfg.color_channel_n
 
         self.dmodel = keras.Sequential(
             [
@@ -32,7 +41,22 @@ class CAModel(keras.Model):
             ]
         )
 
-        self(tf.zeros([1, 3, 3, channel_n]))  # dummy call to build the model
+        self(tf.zeros([1, 3, 3, self.channel_n]))  # dummy call to build the model
+
+    def build_seed(self, x: np.ndarray):
+
+        h, w, _ = x.shape
+        x0 = np.zeros([h, w, self.channel_n], np.float32)
+        x0[h // 2, w // 2, self.color_channel_n :] = 1.0
+
+        return x0
+
+    @tf.function
+    def loss_f(self, x, pad_target):
+
+        x = x[..., : pad_target.shape[-1]]
+
+        return tf.reduce_mean(tf.square(x - pad_target), [-2, -3, -1])
 
     @tf.function
     def perceive(self, x, angle=0.0):
@@ -62,6 +86,41 @@ class CAModel(keras.Model):
         post_life_mask = get_living_mask(x)
         life_mask = pre_life_mask & post_life_mask
         return x * tf.cast(life_mask, tf.float32)
+
+
+class AutoencodeCAModel(keras.Model):
+
+    def __init__(self, cfg: CAConfig):
+        super().__init__()
+
+        self.cfg = cfg
+        self.emodel = keras.Sequential(
+            [
+                Conv2D(128, 1, activation=tf.nn.relu),
+                Conv2D(
+                    cfg.channel_n - cfg.color_channel_n - 1, 1, activation=tf.nn.relu
+                ),
+                GlobalAveragePooling2D(),
+            ]
+        )
+        self.dmodel = CAModel(
+            channel_n=cfg.channel_n,
+            fire_rate=cfg.cell_fire_rate,
+        )
+
+    def call(self, x: tf.Tensor, iter_n: int):
+
+        seed_cell = self.emodel(x)
+        x0 = tf.zeros_like(x)
+        b, h, w, c = x.shape
+        x0[:, h // 2, w // 2, self.cfg.color_channel_n] = 1.0
+        x0[:, h // 2, w // 2, self.cfg.color_channel_n :] = seed_cell
+
+        x = x0
+        for i in tf.range(iter_n):
+            x = self.dmodel(x)
+
+        return x
 
 
 def export_model(ca: CAModel, base_fn):

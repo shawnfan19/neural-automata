@@ -6,17 +6,20 @@ import keras
 import matplotlib.pyplot as pl
 import numpy as np
 import tensorflow as tf
-print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
+
+tf.config.run_functions_eagerly(True)
+print("Num GPUs Available: ", len(tf.config.list_physical_devices("GPU")))
 
 import wandb
 from omegaconf import OmegaConf
 
-from neuromata.model import CAModel, export_model
+from neuromata.data import DataConfig
+from neuromata.data.emoji import load_emoji
+from neuromata.data.mnist import load_mnist
+from neuromata.model import CAConfig, CAModel, export_model
 from neuromata.pool import SamplePool
 from neuromata.utils.image import (
     generate_pool_figures,
-    load_emoji,
-    to_rgba,
     visualize_batch,
 )
 
@@ -31,48 +34,26 @@ class LogConfig:
 
 
 @dataclass
-class CAConfig:
-    channel_n: int = 16
-    cell_fire_rate: float = 0.5
-
-
-@dataclass
 class TrainConfig:
     use_pattern_pool: bool = False
     pool_size: int = 1024
     batch_size: int = 8
-    target_emoji: str = "🦎"
-    target_size: int = 40
-    target_padding: int = 16
+    data: DataConfig = field(default_factory=DataConfig)
     model: CAConfig = field(default_factory=CAConfig)
     log: LogConfig = field(default_factory=LogConfig)
 
 
-def plot_loss(loss_log):
-    pl.figure(figsize=(10, 4))
-    pl.title("Loss history (log10)")
-    pl.plot(np.log10(loss_log), ".", alpha=0.1)
-    pl.show()
-
-
-def loss_f(x, pad_target):
-    return tf.reduce_mean(tf.square(to_rgba(x) - pad_target), [-2, -3, -1])
-
-
 def train(cfg: TrainConfig):
 
-    target_img = load_emoji(cfg.target_emoji, max_size=cfg.target_size)
+    if cfg.data.dataset == "emoji":
+        target_img = load_emoji(cfg.data)
+    elif cfg.data.dataset == "mnist":
+        target_img = load_mnist(cfg.data)
 
-    p = cfg.target_padding
+    p = cfg.data.pad
     pad_target = tf.pad(target_img, [(p, p), (p, p), (0, 0)])
-    h, w = pad_target.shape[:2]
-    seed = np.zeros([h, w, cfg.model.channel_n], np.float32)
-    seed[h // 2, w // 2, 3:] = 1.0
 
-    ca = CAModel(
-        channel_n=cfg.model.channel_n,
-        fire_rate=cfg.model.cell_fire_rate,
-    )
+    ca = CAModel(cfg=cfg.model)
     ca.dmodel.summary()
 
     loss_log = []
@@ -81,6 +62,7 @@ def train(cfg: TrainConfig):
     lr_sched = keras.optimizers.schedules.PiecewiseConstantDecay([2000], [lr, lr * 0.1])
     trainer = keras.optimizers.Adam(lr_sched)
 
+    seed = ca.build_seed(pad_target)
     # loss0 = loss_f(x=seed, pad_target=pad_target).numpy()
     if cfg.use_pattern_pool:
         pool = SamplePool(x=np.repeat(seed[None, ...], cfg.pool_size, 0))
@@ -91,7 +73,7 @@ def train(cfg: TrainConfig):
         with tf.GradientTape() as g:
             for i in tf.range(iter_n):
                 x = ca(x)
-            loss = tf.reduce_mean(loss_f(x, pad_target))
+            loss = tf.reduce_mean(ca.loss_f(x, pad_target))
         grads = g.gradient(loss, ca.weights)
         grads = [g / (tf.norm(g) + 1e-8) for g in grads]
         trainer.apply_gradients(zip(grads, ca.weights))
@@ -108,7 +90,7 @@ def train(cfg: TrainConfig):
         if cfg.use_pattern_pool:
             batch = pool.sample(cfg.batch_size)
             x0 = batch.x
-            loss_rank = loss_f(x0, pad_target).numpy().argsort()[::-1]
+            loss_rank = ca.loss_f(x0, pad_target).numpy().argsort()[::-1]
             x0 = x0[loss_rank]
             x0[:1] = seed
         else:
@@ -126,7 +108,7 @@ def train(cfg: TrainConfig):
         if step_i % 100 == 0:
             if cfg.use_pattern_pool:
                 generate_pool_figures(pool, step_i)
-            img = visualize_batch(x0, x, step_i)
+            img = visualize_batch(x0, x, cdims=ca.color_channel_n)
             if cfg.log.use_wandb:
                 wandb.log(
                     {

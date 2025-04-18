@@ -3,7 +3,6 @@ import io
 
 import numpy as np
 import PIL.Image
-import PIL.ImageDraw
 import requests
 import tensorflow as tf
 
@@ -69,27 +68,17 @@ def load_image(url, max_size):
     return img
 
 
-def load_emoji(emoji, max_size):
-    code = hex(ord(emoji))[2:].lower()
-    url = (
-        "https://github.com/googlefonts/noto-emoji/blob/main/png/128/emoji_u%s.png?raw=true"
-        % code
-    )
-    return load_image(url, max_size)
+def to_rgb(x: tf.Tensor, cdims: int):
 
-
-def to_rgba(x):
-    return x[..., :4]
-
-
-def to_alpha(x):
-    return tf.clip_by_value(x[..., 3:4], 0.0, 1.0)
-
-
-def to_rgb(x: np.ndarray):
-    # assume rgb premultiplied by alpha
-    rgb, a = x[..., :3], to_alpha(x)
-    return 1.0 - a + rgb
+    if cdims == 3:
+        rgb = x[..., :3]
+        a = tf.clip_by_value(x[..., 3:4], 0.0, 1.0)
+        # assume rgb premultiplied by alpha
+        return 1.0 - a + rgb
+    elif cdims == 1:
+        rgb = np.repeat(x[..., :1], 3, -1)
+        a = tf.clip_by_value(x[..., 1:2], 0.0, 1.0)
+        return rgb * a
 
 
 def generate_pool_figures(pool, step_i):
@@ -111,8 +100,8 @@ def generate_pool_figures(pool, step_i):
     imwrite("train_log/%04d_pool.jpg" % step_i, tiled_pool)
 
 
-def visualize_batch(x0, x, step_i):
-    vis0 = np.hstack(to_rgb(x0).numpy())
-    vis1 = np.hstack(to_rgb(x).numpy())
+def visualize_batch(x0: np.ndarray, x: np.ndarray, cdims: int):
+    vis0 = np.hstack(to_rgb(x0, cdims=cdims).numpy())
+    vis1 = np.hstack(to_rgb(x, cdims=cdims).numpy())
     vis = np.vstack([vis0, vis1])
     return vis
