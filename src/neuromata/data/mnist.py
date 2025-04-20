@@ -22,12 +22,6 @@ class MNISTDataset:
         batch_images = batch_images.reshape(-1, self.cfg.size, self.cfg.size, 1)
         batch_images = batch_images.astype("float32") / 255.0
 
-        # p = self.cfg.pad
-        # batch_images = tf.pad(
-        #     batch_images,
-        #     [(0, 0), (p, p), (p, p), (0, 0)]
-        #     )
-
         return batch_images, batch_labels
 
 
@@ -52,4 +46,4 @@ def load_mnist(cfg: DataConfig):
     target_img = np.array(target_img)
     target_img = target_img.astype("float32") / 255.0
 
-    return target
+    return target_img
