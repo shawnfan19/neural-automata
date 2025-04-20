@@ -7,7 +7,6 @@ import matplotlib.pyplot as pl
 import numpy as np
 import tensorflow as tf
 
-tf.config.run_functions_eagerly(True)
 print("Num GPUs Available: ", len(tf.config.list_physical_devices("GPU")))
 
 import wandb
@@ -31,6 +30,8 @@ class LogConfig:
     use_wandb: bool = True
     wandb_project: str = "neuromata"
     wandb_run_name: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    loss_log_freq: int = 1
+    vis_log_freq: int = 100
 
 
 @dataclass
@@ -105,26 +106,32 @@ def train(cfg: TrainConfig):
         step_i = len(loss_log)
         loss_log.append(loss.numpy())
 
-        if step_i % 100 == 0:
+        if step_i % cfg.log.vis_log_freq == 0:
             if cfg.use_pattern_pool:
                 generate_pool_figures(pool, step_i)
             img = visualize_batch(x0, x, cdims=ca.color_channel_n)
             if cfg.log.use_wandb:
                 wandb.log(
                     {
-                        "step": step_i,
-                        "loss": loss.numpy(),
                         "img": wandb.Image(
                             img, caption="train_batches_%04d.jpg" % step_i
-                        ),
-                    }
+                        )
+                    },
+                    commit=False,
                 )
-            # export_model(ca, "train_log/%04d.weights.h5" % step_i)
-
+        if step_i % cfg.log.loss_log_freq == 0:
             print(
                 "\r step: %d, log10(loss): %.3f" % (len(loss_log), np.log10(loss)),
                 end="",
             )
+            if cfg.log.use_wandb:
+                wandb.log(
+                    {
+                        "loss": loss,
+                    }
+                )
+
+            # export_model(ca, "train_log/%04d.weights.h5" % step_i)
 
 
 def main():
