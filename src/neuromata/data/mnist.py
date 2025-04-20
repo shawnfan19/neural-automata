@@ -15,6 +15,9 @@ class MNISTDataset:
         self.images = np.array(images)
         self.labels = np.array(labels)
 
+    def __len__(self):
+        return self.images.shape[0]
+
     def load_batch(self, idx):
 
         batch_images = self.images[idx]
@@ -27,11 +30,12 @@ class MNISTDataset:
 
 def load_mnist(cfg: DataConfig):
 
+    rng = np.random.default_rng(seed=cfg.seed)
+
     ds = MNISTDataset(cfg)
-    is_target = ds.labels == int(cfg.target)
-    candidates = ds.images[is_target]
-    target_idx = np.random.choice(candidates.shape[0])
-    target = candidates[target_idx]
+    target_idx = np.arange(len(ds))[ds.labels == int(cfg.target)]
+    selected_idx = rng.choice(target_idx)
+    target = ds.images[selected_idx]
 
     target = target.reshape(28, 28).astype(np.uint8)
     target = np.expand_dims(target, axis=-1)
@@ -41,9 +45,8 @@ def load_mnist(cfg: DataConfig):
     target_img = np2pil(target)
     target_img = target_img.resize((cfg.size, cfg.size))
     target_img = target_img.convert("LA")
-    # target_img = target_img.convert("RGBA")
 
     target_img = np.array(target_img)
     target_img = target_img.astype("float32") / 255.0
 
-    return target_img
+    return target_img, selected_idx

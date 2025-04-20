@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 @dataclass
 class DataConfig:
+    seed: int = 42
     dataset: str = "mnist"
     dataset_path: str = "data/mnist"
     target: str = "🦎"

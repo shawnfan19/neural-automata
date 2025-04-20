@@ -16,9 +16,11 @@ from neuromata.data import DataConfig
 from neuromata.data.emoji import load_emoji
 from neuromata.data.mnist import load_mnist
 from neuromata.model import CAConfig, CAModel, export_model
+from neuromata.optim import OptimizerConfig, configure_optimizer
 from neuromata.pool import SamplePool
 from neuromata.utils.image import (
     generate_pool_figures,
+    to_rgb,
     visualize_batch,
 )
 
@@ -39,17 +41,37 @@ class TrainConfig:
     use_pattern_pool: bool = False
     pool_size: int = 1024
     batch_size: int = 8
+    n_steps: int = 8000
     data: DataConfig = field(default_factory=DataConfig)
     model: CAConfig = field(default_factory=CAConfig)
+    optim: OptimizerConfig = field(default_factory=OptimizerConfig)
     log: LogConfig = field(default_factory=LogConfig)
 
 
 def train(cfg: TrainConfig):
 
+    if cfg.log.use_wandb:
+        wandb.init(
+            project=cfg.log.wandb_project,
+            name=cfg.log.wandb_run_name,
+            config=asdict(cfg),
+        )
+
     if cfg.data.dataset == "emoji":
         target_img = load_emoji(cfg.data)
     elif cfg.data.dataset == "mnist":
-        target_img = load_mnist(cfg.data)
+        target_img, target_idx = load_mnist(cfg.data)
+        if cfg.log.use_wandb:
+            wandb.log(
+                {
+                    "target_idx": target_idx,
+                    "target_img": wandb.Image(
+                        to_rgb(target_img, cdims=cfg.model.color_channel_n),
+                        caption="target.jpg",
+                    ),
+                },
+                commit=False,
+            )
 
     p = cfg.data.pad
     pad_target = tf.pad(target_img, [(p, p), (p, p), (0, 0)])
@@ -57,11 +79,10 @@ def train(cfg: TrainConfig):
     ca = CAModel(cfg=cfg.model)
     ca.dmodel.summary()
 
-    loss_log = []
-
-    lr = 2e-3
-    lr_sched = keras.optimizers.schedules.PiecewiseConstantDecay([2000], [lr, lr * 0.1])
-    trainer = keras.optimizers.Adam(lr_sched)
+    # lr = 2e-3
+    # lr_schedule = keras.optimizers.schedules.PiecewiseConstantDecay([2000], [lr, lr * 0.1])
+    # optim = keras.optimizers.Adam(lr_schedule)
+    lr_schedule, optim = configure_optimizer(cfg.optim)
 
     seed = ca.build_seed(pad_target)
     # loss0 = loss_f(x=seed, pad_target=pad_target).numpy()
@@ -77,17 +98,11 @@ def train(cfg: TrainConfig):
             loss = tf.reduce_mean(ca.loss_f(x, pad_target))
         grads = g.gradient(loss, ca.weights)
         grads = [g / (tf.norm(g) + 1e-8) for g in grads]
-        trainer.apply_gradients(zip(grads, ca.weights))
+        optim.apply_gradients(zip(grads, ca.weights))
         return x, loss
 
-    if cfg.log.use_wandb:
-        wandb.init(
-            project=cfg.log.wandb_project,
-            name=cfg.log.wandb_run_name,
-            config=asdict(cfg),
-        )
-
-    for i in range(8000 + 1):
+    loss_log = []
+    for i in range(cfg.n_steps):
         if cfg.use_pattern_pool:
             batch = pool.sample(cfg.batch_size)
             x0 = batch.x
@@ -128,6 +143,7 @@ def train(cfg: TrainConfig):
                 wandb.log(
                     {
                         "loss": loss,
+                        "lr": lr_schedule(step_i),
                     }
                 )
 
