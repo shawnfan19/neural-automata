@@ -16,11 +16,6 @@ class CAConfig:
     cell_fire_rate: float = 0.5
 
 
-def get_living_mask(x):
-    alpha = x[:, :, :, 3:4]
-    return tf.nn.max_pool2d(alpha, 3, [1, 1, 1, 1], "SAME") > 0.1
-
-
 class CAModel(keras.Model):
 
     def __init__(self, cfg: CAConfig):
@@ -52,6 +47,13 @@ class CAModel(keras.Model):
         return x0
 
     @tf.function
+    def get_living_mask(self, x):
+
+        alpha = x[:, :, :, self.color_channel_n : self.color_channel_n + 1]
+
+        return tf.nn.max_pool2d(alpha, 3, [1, 1, 1, 1], "SAME") > 0.1
+
+    @tf.function
     def loss_f(self, x, pad_target):
 
         x = x[..., : pad_target.shape[-1]]
@@ -74,7 +76,7 @@ class CAModel(keras.Model):
 
     @tf.function
     def call(self, x, fire_rate=None, angle=0.0, step_size=1.0):
-        pre_life_mask = get_living_mask(x)
+        pre_life_mask = self.get_living_mask(x)
 
         y = self.perceive(x, angle)
         dx = self.dmodel(y) * step_size
@@ -83,7 +85,7 @@ class CAModel(keras.Model):
         update_mask = tf.random.uniform(tf.shape(x[:, :, :, :1])) <= fire_rate
         x += dx * tf.cast(update_mask, tf.float32)
 
-        post_life_mask = get_living_mask(x)
+        post_life_mask = self.get_living_mask(x)
         life_mask = pre_life_mask & post_life_mask
         return x * tf.cast(life_mask, tf.float32)
 
