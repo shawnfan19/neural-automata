@@ -11,10 +11,11 @@ from tensorflow.python.framework import convert_to_constants
 
 @dataclass
 class CAConfig:
+    seed: int = 42
     channel_n: int = 16
     color_channel_n: int = 3
     cell_fire_rate: float = 0.5
-    initialize: str = "point"
+    initialize: str = "center-point"
 
 
 class CAModel(keras.Model):
@@ -22,6 +23,8 @@ class CAModel(keras.Model):
     def __init__(self, cfg: CAConfig):
         super().__init__()
         self.cfg = cfg
+
+        self.rng = np.random.default_rng(cfg.seed)
 
         self.dmodel = keras.Sequential(
             [
@@ -42,8 +45,12 @@ class CAModel(keras.Model):
         h, w, _ = x.shape
         cent_y, cent_x = h // 2, w // 2
         x0 = np.zeros([h, w, self.cfg.channel_n], np.float32)
-        if self.cfg.initialize == "point":
+        if self.cfg.initialize == "center-point":
             x0[cent_y, cent_x, self.cfg.color_channel_n :] = 1.0
+        elif self.cfg.initialize == "inside-point":
+            y_candidates, x_candidates = np.where(x[:, :, self.cfg.color_channel_n] > 0)
+            idx = self.rng.choice(len(x_candidates))
+            x0[y_candidates[idx], x_candidates[idx], self.cfg.color_channel_n :] = 1.0
         elif self.cfg.initialize == "circle":
             y_indices, x_indices = np.ogrid[:h, :w]
             radius = min(h, w) // 2
