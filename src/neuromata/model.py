@@ -14,21 +14,20 @@ class CAConfig:
     channel_n: int = 16
     color_channel_n: int = 3
     cell_fire_rate: float = 0.5
+    initialize: str = "point"
 
 
 class CAModel(keras.Model):
 
     def __init__(self, cfg: CAConfig):
         super().__init__()
-        self.channel_n = cfg.channel_n
-        self.fire_rate = cfg.cell_fire_rate
-        self.color_channel_n = cfg.color_channel_n
+        self.cfg = cfg
 
         self.dmodel = keras.Sequential(
             [
                 Conv2D(128, 1, activation=tf.nn.relu),
                 Conv2D(
-                    self.channel_n,
+                    cfg.channel_n,
                     1,
                     activation=None,
                     kernel_initializer=tf.zeros_initializer,
@@ -36,20 +35,29 @@ class CAModel(keras.Model):
             ]
         )
 
-        self(tf.zeros([1, 3, 3, self.channel_n]))  # dummy call to build the model
+        self(tf.zeros([1, 3, 3, cfg.channel_n]))  # dummy call to build the model
 
     def build_seed(self, x: np.ndarray):
 
         h, w, _ = x.shape
-        x0 = np.zeros([h, w, self.channel_n], np.float32)
-        x0[h // 2, w // 2, self.color_channel_n :] = 1.0
+        cent_y, cent_x = h // 2, w // 2
+        x0 = np.zeros([h, w, self.cfg.channel_n], np.float32)
+        if self.cfg.initialize == "point":
+            x0[cent_y, cent_x, self.cfg.color_channel_n :] = 1.0
+        elif self.cfg.initialize == "circle":
+            y_indices, x_indices = np.ogrid[:h, :w]
+            radius = min(h, w) // 2
+            mask = ((x_indices - cent_x) ** 2 + (y_indices - cent_y) ** 2) <= radius**2
+            x0[mask, self.cfg.color_channel_n :] = 1.0
+        else:
+            raise ValueError(f"Unknown initialize method: {self.cfg.initialize}")
 
         return x0
 
     @tf.function
     def get_living_mask(self, x):
 
-        alpha = x[:, :, :, self.color_channel_n : self.color_channel_n + 1]
+        alpha = x[:, :, :, self.cfg.color_channel_n : self.cfg.color_channel_n + 1]
 
         return tf.nn.max_pool2d(alpha, 3, [1, 1, 1, 1], "SAME") > 0.1
 
@@ -70,7 +78,7 @@ class CAModel(keras.Model):
         kernel = tf.stack([identify, c * dx - s * dy, s * dx + c * dy], -1)[
             :, :, None, :
         ]
-        kernel = tf.repeat(kernel, self.channel_n, 2)
+        kernel = tf.repeat(kernel, self.cfg.channel_n, 2)
         y = tf.nn.depthwise_conv2d(x, kernel, [1, 1, 1, 1], "SAME")
         return y
 
@@ -81,7 +89,7 @@ class CAModel(keras.Model):
         y = self.perceive(x, angle)
         dx = self.dmodel(y) * step_size
         if fire_rate is None:
-            fire_rate = self.fire_rate
+            fire_rate = self.cfg.cell_fire_rate
         update_mask = tf.random.uniform(tf.shape(x[:, :, :, :1])) <= fire_rate
         x += dx * tf.cast(update_mask, tf.float32)
 

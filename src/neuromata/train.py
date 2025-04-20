@@ -124,7 +124,7 @@ def train(cfg: TrainConfig):
         if step_i % cfg.log.vis_log_freq == 0:
             if cfg.use_pattern_pool:
                 generate_pool_figures(pool, step_i)
-            img = visualize_batch(x0, x, cdims=ca.color_channel_n)
+            img = visualize_batch(x0, x, cdims=ca.cfg.color_channel_n)
             if cfg.log.use_wandb:
                 wandb.log(
                     {
