@@ -30,9 +30,9 @@ class CAModel(torch.nn.Module):
         )
 
         target_layer = self.update_rule[2]
-        torch.nn.init.constant_(target_layer.weight, 0)
+        torch.nn.init.constant_(target_layer.weight, 0)  # type: ignore
         if target_layer.bias is not None:
-            torch.nn.init.constant_(target_layer.bias, 0)
+            torch.nn.init.constant_(target_layer.bias, 0)  # type: ignore
 
     def build_seed(self, x: np.ndarray):
 
@@ -79,7 +79,7 @@ class CAModel(torch.nn.Module):
         kernel = np.stack([identify, c * dx - s * dy, s * dx + c * dy], axis=0)[
             :, None, :, :
         ]
-        kernel = np.repeat(kernel, self.cfg.channel_n, 0)
+        kernel = np.tile(kernel, (self.cfg.channel_n, 1, 1, 1))
 
         kernel = torch.tensor(kernel, dtype=torch.float32, device=x.device)
 

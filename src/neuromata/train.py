@@ -147,7 +147,7 @@ def main():
     # convert structured config back to underlying dataclass
     cfg = OmegaConf.to_object(cfg)
 
-    train(cfg=cfg)
+    train(cfg=cfg)  # type: ignore
 
 
 if __name__ == "__main__":
