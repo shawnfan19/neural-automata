@@ -4,7 +4,6 @@ import io
 import numpy as np
 import PIL.Image
 import requests
-import tensorflow as tf
 
 
 def np2pil(a: np.ndarray):
@@ -68,40 +67,23 @@ def load_image(url, max_size):
     return img
 
 
-def to_rgb(x: tf.Tensor, cdims: int):
+def to_rgb(x: np.ndarray, cdims: int) -> np.ndarray:
 
     if cdims == 3:
         rgb = x[..., :3]
-        a = tf.clip_by_value(x[..., 3:4], 0.0, 1.0)
+        a = np.clip(x[..., 3:4], 0.0, 1.0)
         # assume rgb premultiplied by alpha
         return 1.0 - a + rgb
     elif cdims == 1:
         rgb = np.repeat(x[..., :1], 3, -1)
-        a = tf.clip_by_value(x[..., 1:2], 0.0, 1.0)
+        a = np.clip(x[..., 1:2], 0.0, 1.0)
         return rgb * a
-
-
-def generate_pool_figures(pool, step_i):
-    tiled_pool = tile2d(to_rgb(pool.x[:49]))
-    fade = np.linspace(1.0, 0.0, 72)
-    ones = np.ones(72)
-    tiled_pool[:, :72] += (-tiled_pool[:, :72] + ones[None, :, None]) * fade[
-        None, :, None
-    ]
-    tiled_pool[:, -72:] += (-tiled_pool[:, -72:] + ones[None, :, None]) * fade[
-        None, ::-1, None
-    ]
-    tiled_pool[:72, :] += (-tiled_pool[:72, :] + ones[:, None, None]) * fade[
-        :, None, None
-    ]
-    tiled_pool[-72:, :] += (-tiled_pool[-72:, :] + ones[:, None, None]) * fade[
-        ::-1, None, None
-    ]
-    imwrite("train_log/%04d_pool.jpg" % step_i, tiled_pool)
+    else:
+        raise ValueError(f"Unknown color channel dimension: {cdims}")
 
 
 def visualize_batch(x0: np.ndarray, x: np.ndarray, cdims: int):
-    vis0 = np.hstack(to_rgb(x0, cdims=cdims).numpy())
-    vis1 = np.hstack(to_rgb(x, cdims=cdims).numpy())
+    vis0 = np.hstack(to_rgb(np.permute_dims(x0, (0, 2, 3, 1)), cdims=cdims))
+    vis1 = np.hstack(to_rgb(np.permute_dims(x, (0, 2, 3, 1)), cdims=cdims))
     vis = np.vstack([vis0, vis1])
     return vis

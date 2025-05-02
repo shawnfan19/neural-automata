@@ -1,10 +1,7 @@
 from dataclasses import dataclass, field
 from functools import partial
 
-import keras
-import tensorflow as tf
-from keras.api.optimizers import Adam
-from keras.api.optimizers.schedules import LearningRateSchedule
+import torch
 
 
 @dataclass
@@ -18,51 +15,48 @@ class OptimizerConfig:
     scheduler_params: dict = field(default_factory=dict)
 
 
-# class PiecewiseConstantLR(LearningRateSchedule):
+def piecewise_constant_lr(
+    it: int,
+    boundaries: list,
+    values: list,
+) -> float:
 
-#     def __init__(
-#         self,
-#         lr: float,
-#         boundaries: list[int],
-#         learn_rates: list[int]):
+    piece = len(boundaries)
+    for i, b in enumerate(boundaries):
+        if it < b:
+            piece = i
+            break
 
-#         assert lr == learn_rates[0], \
-#             "lr must be equal to the first learn rate"
-#         assert len(boundaries) == len(learn_rates) - 1, \
-#             "len(boundaries) must be equal to len(learn_rates) - 1"
-
-#         self.lr = lr
-#         self.boundaries = boundaries
-#         self.learn_rates = learn_rates
-
-#     def __call__(
-#         self,
-#         step: int) -> float:
-
-#         for i, b in enumerate(self.boundaries):
-#             if step < b:
-#                 return self.learn_rates[i]
-
-#         return self.learn_rates[-1]
+    return values[piece]
 
 
-def configure_optimizer(cfg: OptimizerConfig):
+def configure_optimizer(
+    model: torch.nn.Module, cfg: OptimizerConfig
+) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR]:
 
     if cfg.scheduler == "piecewise-constant":
         boundaries = cfg.scheduler_params["boundaries"]
         values = cfg.scheduler_params["values"]
-        assert cfg.lr == values[0], "lr must be equal to the first learn rate"
         assert (
             len(boundaries) == len(values) - 1
         ), "len(boundaries) must be equal to len(learn_rates) - 1"
-        scheduler = keras.optimizers.schedules.PiecewiseConstantDecay(
-            boundaries, values
+        lr_schedule_fn = partial(
+            piecewise_constant_lr,
+            boundaries=boundaries,
+            values=values,
         )
     else:
         raise ValueError(f"Unknown scheduler: {cfg.scheduler}")
 
-    optimizer = Adam(
-        learning_rate=scheduler, beta_1=cfg.beta1, beta_2=cfg.beta2, epsilon=cfg.epsilon
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=cfg.lr,
+        betas=(cfg.beta1, cfg.beta2),
     )
 
-    return scheduler, optimizer
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lr_schedule_fn,
+    )
+
+    return optimizer, scheduler

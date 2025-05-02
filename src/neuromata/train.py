@@ -2,29 +2,20 @@ import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
-import keras
-import matplotlib.pyplot as pl
 import numpy as np
-import tensorflow as tf
-
-print("Num GPUs Available: ", len(tf.config.list_physical_devices("GPU")))
-
+import torch
 import wandb
 from omegaconf import OmegaConf
 
 from neuromata.data import DataConfig
 from neuromata.data.emoji import load_emoji
 from neuromata.data.mnist import load_mnist
-from neuromata.model import CAConfig, CAModel, export_model
+from neuromata.model import CAConfig, CAModel
 from neuromata.optim import OptimizerConfig, configure_optimizer
-from neuromata.pool import SamplePool
 from neuromata.utils.image import (
-    generate_pool_figures,
     to_rgb,
     visualize_batch,
 )
-
-os.environ["FFMPEG_BINARY"] = "ffmpeg"
 
 
 @dataclass
@@ -41,6 +32,7 @@ class TrainConfig:
     use_pattern_pool: bool = False
     pool_size: int = 1024
     batch_size: int = 8
+    device: str = "mps"
     n_steps: int = 8000
     data: DataConfig = field(default_factory=DataConfig)
     model: CAConfig = field(default_factory=CAConfig)
@@ -57,74 +49,66 @@ def train(cfg: TrainConfig):
             config=asdict(cfg),
         )
 
-    if cfg.data.dataset == "emoji":
-        target_img = load_emoji(cfg.data)
-    elif cfg.data.dataset == "mnist":
-        target_img, target_idx = load_mnist(cfg.data)
-        if cfg.log.use_wandb:
-            wandb.log(
-                {
-                    "target_idx": target_idx,
-                    "target_img": wandb.Image(
-                        to_rgb(target_img, cdims=cfg.model.color_channel_n),
-                        caption="target.jpg",
+    target_img, target_idx = load_mnist(cfg.data)
+    if cfg.log.use_wandb:
+        wandb.log(
+            {
+                "target_idx": target_idx,
+                "target_img": wandb.Image(
+                    to_rgb(
+                        np.permute_dims(target_img, (1, 2, 0)),
+                        cdims=cfg.model.color_channel_n,
                     ),
-                },
-                commit=False,
-            )
-
-    p = cfg.data.pad
-    pad_target = tf.pad(target_img, [(p, p), (p, p), (0, 0)])
+                    caption="target.jpg",
+                ),
+            },
+            commit=False,
+        )
 
     ca = CAModel(cfg=cfg.model)
-    ca.dmodel.summary()
+    ca.to(cfg.device)
 
-    # lr = 2e-3
-    # lr_schedule = keras.optimizers.schedules.PiecewiseConstantDecay([2000], [lr, lr * 0.1])
-    # optim = keras.optimizers.Adam(lr_schedule)
-    lr_schedule, optim = configure_optimizer(cfg.optim)
+    optimizer, scheduler = configure_optimizer(model=ca, cfg=cfg.optim)
 
-    seed = ca.build_seed(pad_target)
-    # loss0 = loss_f(x=seed, pad_target=pad_target).numpy()
-    if cfg.use_pattern_pool:
-        pool = SamplePool(x=np.repeat(seed[None, ...], cfg.pool_size, 0))
-
-    @tf.function
-    def train_step(x):
-        iter_n = tf.random.uniform([], 64, 96, tf.int32)
-        with tf.GradientTape() as g:
-            for i in tf.range(iter_n):
-                x = ca(x)
-            loss = tf.reduce_mean(ca.loss_f(x, pad_target))
-        grads = g.gradient(loss, ca.weights)
-        grads = [g / (tf.norm(g) + 1e-8) for g in grads]
-        optim.apply_gradients(zip(grads, ca.weights))
-        return x, loss
+    seed = ca.build_seed(target_img)
+    x0 = np.repeat(seed[None, ...], cfg.batch_size, 0)
+    x0 = torch.tensor(x0)
 
     loss_log = []
     for i in range(cfg.n_steps):
-        if cfg.use_pattern_pool:
-            batch = pool.sample(cfg.batch_size)
-            x0 = batch.x
-            loss_rank = ca.loss_f(x0, pad_target).numpy().argsort()[::-1]
-            x0 = x0[loss_rank]
-            x0[:1] = seed
-        else:
-            x0 = np.repeat(seed[None, ...], cfg.batch_size, 0)
 
-        x, loss = train_step(x0)
+        x_target = torch.tensor(target_img[None, ...])
+        x_target = x_target.to(cfg.device)
 
-        if cfg.use_pattern_pool:
-            batch.x[:] = x
-            batch.commit()
+        x = x0.clone()
+        x = x.to(cfg.device)
+
+        iter_n = np.random.randint(low=64, high=96)
+        for _ in np.arange(iter_n):
+            x = ca(x)
+
+        loss = ca.loss_f(x, x_target)
+
+        loss.backward()
+        for param in ca.parameters():
+            if param.grad is not None:
+                grad = param.grad
+                norm = grad.norm() + 1e-8
+                param.grad = grad / norm
+        optimizer.step()
+        scheduler.step()
+
+        # grads = [g / (tf.norm(g) + 1e-8) for g in grads]
 
         step_i = len(loss_log)
-        loss_log.append(loss.numpy())
+        loss_log.append(loss.detach().cpu().numpy())
 
         if step_i % cfg.log.vis_log_freq == 0:
-            if cfg.use_pattern_pool:
-                generate_pool_figures(pool, step_i)
-            img = visualize_batch(x0, x, cdims=ca.cfg.color_channel_n)
+            img = visualize_batch(
+                x0.detach().cpu().numpy(),
+                x.detach().cpu().numpy(),
+                cdims=ca.cfg.color_channel_n,
+            )
             if cfg.log.use_wandb:
                 wandb.log(
                     {
@@ -136,14 +120,15 @@ def train(cfg: TrainConfig):
                 )
         if step_i % cfg.log.loss_log_freq == 0:
             print(
-                "\r step: %d, log10(loss): %.3f" % (len(loss_log), np.log10(loss)),
+                "\r step: %d, log10(loss): %.3f"
+                % (len(loss_log), np.log10(loss_log[-1])),
                 end="",
             )
             if cfg.log.use_wandb:
                 wandb.log(
                     {
-                        "loss": loss,
-                        "lr": lr_schedule(step_i),
+                        "loss": loss_log[-1],
+                        "lr": scheduler.get_last_lr()[-1],
                     }
                 )
 

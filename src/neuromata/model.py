@@ -1,12 +1,9 @@
-import json
 from dataclasses import dataclass
+from typing import Optional
 
-import keras
 import numpy as np
-import tensorflow as tf
-from google.protobuf.json_format import MessageToDict
-from keras.api.layers import Conv2D, GlobalAveragePooling2D
-from tensorflow.python.framework import convert_to_constants
+import torch
+import torch.nn.functional as F
 
 
 @dataclass
@@ -18,7 +15,7 @@ class CAConfig:
     initialize: str = "center-point"
 
 
-class CAModel(keras.Model):
+class CAModel(torch.nn.Module):
 
     def __init__(self, cfg: CAConfig):
         super().__init__()
@@ -26,137 +23,91 @@ class CAModel(keras.Model):
 
         self.rng = np.random.default_rng(cfg.seed)
 
-        self.dmodel = keras.Sequential(
-            [
-                Conv2D(128, 1, activation=tf.nn.relu),
-                Conv2D(
-                    cfg.channel_n,
-                    1,
-                    activation=None,
-                    kernel_initializer=tf.zeros_initializer,
-                ),
-            ]
+        self.update_rule = torch.nn.Sequential(
+            torch.nn.Conv2d(self.cfg.channel_n * 3, 128, kernel_size=1),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(128, self.cfg.channel_n, kernel_size=1),
         )
 
-        self(tf.zeros([1, 3, 3, cfg.channel_n]))  # dummy call to build the model
+        target_layer = self.update_rule[2]
+        torch.nn.init.constant_(target_layer.weight, 0)
+        if target_layer.bias is not None:
+            torch.nn.init.constant_(target_layer.bias, 0)
 
     def build_seed(self, x: np.ndarray):
 
-        h, w, _ = x.shape
+        _, h, w = x.shape
         cent_y, cent_x = h // 2, w // 2
-        x0 = np.zeros([h, w, self.cfg.channel_n], np.float32)
+        x0 = np.zeros([self.cfg.channel_n, h, w], np.float32)
         if self.cfg.initialize == "center-point":
-            x0[cent_y, cent_x, self.cfg.color_channel_n :] = 1.0
+            x0[self.cfg.color_channel_n :, cent_y, cent_x] = 1.0
         elif self.cfg.initialize == "inside-point":
-            y_candidates, x_candidates = np.where(x[:, :, self.cfg.color_channel_n] > 0)
+            y_candidates, x_candidates = np.where(x[self.cfg.color_channel_n, :, :] > 0)
             idx = self.rng.choice(len(x_candidates))
-            x0[y_candidates[idx], x_candidates[idx], self.cfg.color_channel_n :] = 1.0
+            x0[self.cfg.color_channel_n :, y_candidates[idx], x_candidates[idx]] = 1.0
         elif self.cfg.initialize == "circle":
             y_indices, x_indices = np.ogrid[:h, :w]
             radius = min(h, w) // 2
             mask = ((x_indices - cent_x) ** 2 + (y_indices - cent_y) ** 2) <= radius**2
-            x0[mask, self.cfg.color_channel_n :] = 1.0
+            x0[self.cfg.color_channel_n :, mask] = 1.0
         else:
             raise ValueError(f"Unknown initialize method: {self.cfg.initialize}")
 
         return x0
 
-    @tf.function
     def get_living_mask(self, x):
 
-        alpha = x[:, :, :, self.cfg.color_channel_n : self.cfg.color_channel_n + 1]
+        alpha = x[:, self.cfg.color_channel_n : self.cfg.color_channel_n + 1, :, :]
 
-        return tf.nn.max_pool2d(alpha, 3, [1, 1, 1, 1], "SAME") > 0.1
+        return F.max_pool2d(alpha, kernel_size=3, stride=1, padding=1) > 0.1
 
-    @tf.function
-    def loss_f(self, x, pad_target):
+    def loss_f(self, x: torch.Tensor, pad_target: torch.Tensor) -> torch.Tensor:
 
-        x = x[..., : pad_target.shape[-1]]
+        x = x[:, : pad_target.shape[1], :, :]
 
-        return tf.reduce_mean(tf.square(x - pad_target), [-2, -3, -1])
+        return torch.mean(torch.square(x - pad_target))
 
-    @tf.function
-    def perceive(self, x, angle=0.0):
-        identify = np.float32([0, 1, 0])
+    def perceive(self, x: torch.Tensor, angle: float = 0.0):
+
+        identify = np.array([0, 1, 0]).astype(np.float32)
         identify = np.outer(identify, identify)
+
         dx = np.outer([1, 2, 1], [-1, 0, 1]) / 8.0  # Sobel filter
         dy = dx.T
-        c, s = tf.cos(angle), tf.sin(angle)
-        kernel = tf.stack([identify, c * dx - s * dy, s * dx + c * dy], -1)[
-            :, :, None, :
+        c, s = np.cos(angle), np.sin(angle)
+
+        kernel = np.stack([identify, c * dx - s * dy, s * dx + c * dy], axis=0)[
+            :, None, :, :
         ]
-        kernel = tf.repeat(kernel, self.cfg.channel_n, 2)
-        y = tf.nn.depthwise_conv2d(x, kernel, [1, 1, 1, 1], "SAME")
+        kernel = np.repeat(kernel, self.cfg.channel_n, 0)
+
+        kernel = torch.tensor(kernel, dtype=torch.float32, device=x.device)
+
+        y = F.conv2d(
+            input=x, weight=kernel, stride=1, padding="same", groups=self.cfg.channel_n
+        )
+
         return y
 
-    @tf.function
-    def call(self, x, fire_rate=None, angle=0.0, step_size=1.0):
+    def forward(
+        self,
+        x: torch.Tensor,
+        fire_rate: Optional[float] = None,
+        angle: float = 0.0,
+        step_size: float = 1.0,
+    ):
+
         pre_life_mask = self.get_living_mask(x)
 
         y = self.perceive(x, angle)
-        dx = self.dmodel(y) * step_size
+        dx = self.update_rule(y) * step_size
         if fire_rate is None:
             fire_rate = self.cfg.cell_fire_rate
-        update_mask = tf.random.uniform(tf.shape(x[:, :, :, :1])) <= fire_rate
-        x += dx * tf.cast(update_mask, tf.float32)
+
+        update_mask = torch.rand(x[:, :1, :, :].shape, device=x.device) <= fire_rate
+        x = x + dx * update_mask.to(torch.float32)
 
         post_life_mask = self.get_living_mask(x)
         life_mask = pre_life_mask & post_life_mask
-        return x * tf.cast(life_mask, tf.float32)
 
-
-class AutoencodeCAModel(keras.Model):
-
-    def __init__(self, cfg: CAConfig):
-        super().__init__()
-
-        self.cfg = cfg
-        self.emodel = keras.Sequential(
-            [
-                Conv2D(128, 1, activation=tf.nn.relu),
-                Conv2D(
-                    cfg.channel_n - cfg.color_channel_n - 1, 1, activation=tf.nn.relu
-                ),
-                GlobalAveragePooling2D(),
-            ]
-        )
-        self.dmodel = CAModel(
-            channel_n=cfg.channel_n,
-            fire_rate=cfg.cell_fire_rate,
-        )
-
-    def call(self, x: tf.Tensor, iter_n: int):
-
-        seed_cell = self.emodel(x)
-        x0 = tf.zeros_like(x)
-        b, h, w, c = x.shape
-        x0[:, h // 2, w // 2, self.cfg.color_channel_n] = 1.0
-        x0[:, h // 2, w // 2, self.cfg.color_channel_n :] = seed_cell
-
-        x = x0
-        for i in tf.range(iter_n):
-            x = self.dmodel(x)
-
-        return x
-
-
-def export_model(ca: CAModel, base_fn):
-    ca.save_weights(base_fn)
-
-    cf = ca.call.get_concrete_function(
-        x=tf.TensorSpec([None, None, None, ca.channel_n]),
-        fire_rate=tf.constant(0.5),
-        angle=tf.constant(0.0),
-        step_size=tf.constant(1.0),
-    )
-    cf = convert_to_constants.convert_variables_to_constants_v2(cf)
-    graph_def = cf.graph.as_graph_def()
-    graph_json = MessageToDict(graph_def)
-    graph_json["versions"] = dict(producer="1.14", minConsumer="1.14")
-    model_json = {
-        "format": "graph-model",
-        "modelTopology": graph_json,
-        "weightsManifest": [],
-    }
-    with open(base_fn + ".json", "w") as f:
-        json.dump(model_json, f)
+        return x * life_mask.to(torch.float32)

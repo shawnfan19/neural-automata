@@ -1,5 +1,4 @@
 import numpy as np
-import tensorflow as tf
 from mnist import MNIST
 
 from neuromata.data import DataConfig
@@ -48,5 +47,10 @@ def load_mnist(cfg: DataConfig):
 
     target_img = np.array(target_img)
     target_img = target_img.astype("float32") / 255.0
+
+    target_img = np.permute_dims(target_img, (2, 0, 1))
+
+    p = cfg.pad
+    target_img = np.pad(target_img, [(0, 0), (p, p), (p, p)])
 
     return target_img, selected_idx
