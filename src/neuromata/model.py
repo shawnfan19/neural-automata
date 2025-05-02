@@ -29,6 +29,8 @@ class CAModel(torch.nn.Module):
             torch.nn.Conv2d(128, self.cfg.channel_n, kernel_size=1),
         )
 
+        torch.nn.init.xavier_uniform_(self.update_rule[0].weight)  # type: ignore
+
         target_layer = self.update_rule[2]
         torch.nn.init.constant_(target_layer.weight, 0)  # type: ignore
         if target_layer.bias is not None:
@@ -65,7 +67,7 @@ class CAModel(torch.nn.Module):
 
         x = x[:, : pad_target.shape[1], :, :]
 
-        return torch.mean(torch.square(x - pad_target))
+        return torch.mean(torch.square(x - pad_target), dim=[1, 2, 3])
 
     def perceive(self, x: torch.Tensor, angle: float = 0.0):
 

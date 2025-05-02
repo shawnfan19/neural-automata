@@ -88,6 +88,7 @@ def train(cfg: TrainConfig):
             x = ca(x)
 
         loss = ca.loss_f(x, x_target)
+        loss = loss.mean()
 
         loss.backward()
         for param in ca.parameters():
