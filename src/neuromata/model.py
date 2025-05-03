@@ -30,11 +30,27 @@ class CAModel(torch.nn.Module):
         )
 
         torch.nn.init.xavier_uniform_(self.update_rule[0].weight)  # type: ignore
+        torch.nn.init.constant_(self.update_rule[0].bias, 0)  # type: ignore
+        torch.nn.init.constant_(self.update_rule[2].weight, 0)  # type: ignore
+        torch.nn.init.constant_(self.update_rule[2].bias, 0)  # type: ignore
 
-        target_layer = self.update_rule[2]
-        torch.nn.init.constant_(target_layer.weight, 0)  # type: ignore
-        if target_layer.bias is not None:
-            torch.nn.init.constant_(target_layer.bias, 0)  # type: ignore
+        angle = 0.0
+
+        identify = np.array([0, 1, 0]).astype(np.float32)
+        identify = np.outer(identify, identify)
+
+        dx = np.outer([1, 2, 1], [-1, 0, 1]) / 8.0  # Sobel filter
+        dy = dx.T
+        c, s = np.cos(angle), np.sin(angle)
+
+        kernel = np.stack([identify, c * dx - s * dy, s * dx + c * dy], axis=0)[
+            :, None, :, :
+        ]
+        kernel = np.tile(kernel, (self.cfg.channel_n, 1, 1, 1))
+
+        self.register_buffer("kernel", torch.tensor(kernel, dtype=torch.float32))
+
+        print(f"built model with parameter count: {count_parameters(self)}")
 
     def build_seed(self, x: np.ndarray):
 
@@ -66,27 +82,14 @@ class CAModel(torch.nn.Module):
     def loss_f(self, x: torch.Tensor, pad_target: torch.Tensor) -> torch.Tensor:
 
         x = x[:, : pad_target.shape[1], :, :]
+        batch_pad_target = pad_target.expand(x.shape[0], *pad_target.shape[1:])
 
-        return torch.mean(torch.square(x - pad_target), dim=[1, 2, 3])
+        return F.mse_loss(x, batch_pad_target, reduction="mean")
 
     def perceive(self, x: torch.Tensor, angle: float = 0.0):
 
-        identify = np.array([0, 1, 0]).astype(np.float32)
-        identify = np.outer(identify, identify)
-
-        dx = np.outer([1, 2, 1], [-1, 0, 1]) / 8.0  # Sobel filter
-        dy = dx.T
-        c, s = np.cos(angle), np.sin(angle)
-
-        kernel = np.stack([identify, c * dx - s * dy, s * dx + c * dy], axis=0)[
-            :, None, :, :
-        ]
-        kernel = np.tile(kernel, (self.cfg.channel_n, 1, 1, 1))
-
-        kernel = torch.tensor(kernel, dtype=torch.float32, device=x.device)
-
         y = F.conv2d(
-            input=x, weight=kernel, stride=1, padding="same", groups=self.cfg.channel_n
+            input=x, weight=self.kernel, stride=1, padding="same", groups=self.cfg.channel_n  # type: ignore
         )
 
         return y
@@ -113,3 +116,8 @@ class CAModel(torch.nn.Module):
         life_mask = pre_life_mask & post_life_mask
 
         return x * life_mask.to(torch.float32)
+
+
+def count_parameters(model: torch.nn.Module) -> int:
+
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)

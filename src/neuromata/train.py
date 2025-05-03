@@ -1,4 +1,3 @@
-import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
@@ -8,7 +7,6 @@ import wandb
 from omegaconf import OmegaConf
 
 from neuromata.data import DataConfig
-from neuromata.data.emoji import load_emoji
 from neuromata.data.mnist import load_mnist
 from neuromata.model import CAConfig, CAModel
 from neuromata.optim import OptimizerConfig, configure_optimizer
@@ -88,14 +86,19 @@ def train(cfg: TrainConfig):
             x = ca(x)
 
         loss = ca.loss_f(x, x_target)
-        loss = loss.mean()
 
+        optimizer.zero_grad()
         loss.backward()
+        grad_norm = []
         for param in ca.parameters():
             if param.grad is not None:
                 grad = param.grad
+                grad_norm.append(grad.norm())
                 norm = grad.norm() + 1e-8
                 param.grad = grad / norm
+            if cfg.log.use_wandb:
+                wandb.log({f"grad_norm/gn-{ii}": gn for ii, gn in enumerate(grad_norm)})
+
         optimizer.step()
         scheduler.step()
 

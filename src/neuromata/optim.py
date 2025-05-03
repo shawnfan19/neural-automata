@@ -49,7 +49,7 @@ def configure_optimizer(
         raise ValueError(f"Unknown scheduler: {cfg.scheduler}")
 
     optimizer = torch.optim.Adam(
-        model.parameters(), lr=cfg.lr, betas=(cfg.beta1, cfg.beta2), eps=1e-7
+        model.parameters(), lr=cfg.lr, betas=(cfg.beta1, cfg.beta2), eps=cfg.epsilon
     )
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(
