@@ -7,7 +7,7 @@ from omegaconf import OmegaConf
 from neuromata.data import DataConfig
 from neuromata.data.mnist import load_mnist
 from neuromata.log import LogConfig, Logger, collage
-from neuromata.model import CAConfig, CAModel, PhenoProjectorCA
+from neuromata.model import AutoencodeCA, CAConfig, CAModel, PhenoProjectorCA
 from neuromata.optim import OptimizerConfig, configure_optimizer
 from neuromata.utils.image import (
     to_grayscale,
@@ -49,6 +49,8 @@ def train(cfg: TrainConfig):
 
     if cfg.model.phenotype_projector:
         ca = PhenoProjectorCA(cfg=cfg.model)
+    elif cfg.model.autoencode_seed:
+        ca = AutoencodeCA(cfg=cfg.model)
     else:
         ca = CAModel(cfg=cfg.model)
     ca.to(cfg.device)

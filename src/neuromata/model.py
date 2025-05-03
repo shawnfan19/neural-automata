@@ -9,6 +9,7 @@ import torch.nn.functional as F
 @dataclass
 class CAConfig:
     seed: int = 42
+    autoencode_seed: bool = False
     phenotype_projector: bool = False
     channel_n: int = 16
     color_channel_n: int = 3
@@ -139,6 +140,41 @@ class CAModel(torch.nn.Module):
         return x * life_mask.to(torch.float32)
 
 
+class AutoencodeCA(CAModel):
+
+    def __init__(self, cfg: CAConfig):
+        super().__init__(cfg=cfg)
+
+        self.seed_pos_encoder = torch.nn.Sequential(
+            torch.nn.Conv2d(
+                self.cfg.color_channel_n + 1, 8, kernel_size=3, stride=1, padding=1
+            ),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(8, 1, kernel_size=3, stride=1, padding=1),
+            torch.nn.ReLU(),
+        )
+
+        print(
+            f"built CA model + autoencoder with parameter count: {count_parameters(self)}"
+        )
+
+    def build_seed(self, x: torch.Tensor) -> torch.Tensor:
+
+        b, _, h, w = x.shape
+        x0 = torch.zeros(b, self.cfg.channel_n, h, w, device=x.device)
+
+        pos_heatmap = self.seed_pos_encoder(x)
+        seed_coords = soft_argmax_2d(pos_heatmap)
+
+        x0 = plant_seed_differentiably(
+            feature_map=x0,
+            coordinates=seed_coords,
+            sigma=1.0,
+        )
+
+        return x0
+
+
 class PhenoProjectorCA(CAModel):
 
     def __init__(self, cfg: CAConfig):
@@ -163,6 +199,82 @@ class PhenoProjectorCA(CAModel):
         pheno = self.phenotype_projector(x)
 
         return pheno
+
+
+def soft_argmax_2d(heatmaps: torch.Tensor) -> torch.Tensor:
+    """
+    Compute the 2D soft-argmax of a batch of heatmaps.
+
+    Args:
+        heatmaps: Tensor of shape (B, C, H, W)
+
+    Returns:
+        coords: Tensor of shape (B, C, 2) with (x, y) coordinates for each keypoint.
+    """
+    B, C, H, W = heatmaps.shape
+
+    # Flatten spatial dimensions and apply softmax
+    heatmaps_flat = heatmaps.view(B, C, -1)
+    softmax = F.softmax(heatmaps_flat, dim=-1)
+
+    # Create coordinate grids
+    coords_x = torch.linspace(0, W - 1, W, device=heatmaps.device)
+    coords_y = torch.linspace(0, H - 1, H, device=heatmaps.device)
+    yy, xx = torch.meshgrid(coords_y, coords_x, indexing="ij")  # (H, W)
+
+    # Flatten coordinate grids
+    xx = xx.reshape(-1)
+    yy = yy.reshape(-1)
+
+    # Compute expected x and y positions
+    exp_x = torch.sum(softmax * xx, dim=-1)  # (B, C)
+    exp_y = torch.sum(softmax * yy, dim=-1)  # (B, C)
+
+    coords = torch.stack([exp_x, exp_y], dim=-1)  # (B, C, 2)
+    return coords
+
+
+def plant_seed_differentiably(
+    feature_map: torch.Tensor, coordinates: torch.Tensor, sigma: float = 1.0
+):
+    """
+    Write values to feature map using differentiable Gaussian attention.
+
+    Args:
+        feature_map: [B, C, H, W] tensor to write to
+        coordinates: [B, N, 2] tensor of (x, y) coordinates
+        values: [B, N, C] tensor of values to write
+        sigma: Width of Gaussian kernel
+    """
+    _, channels, H, W = feature_map.shape
+    B, N, _ = coordinates.shape
+
+    # Create coordinate grid
+    y_grid, x_grid = torch.meshgrid(
+        torch.arange(H, device=coordinates.device),
+        torch.arange(W, device=coordinates.device),
+    )
+    grid = torch.stack([x_grid, y_grid], dim=-1).float()  # [H, W, 2]
+
+    # Expand grid and coordinates
+    grid = grid.unsqueeze(0).unsqueeze(1).expand(B, N, H, W, 2)  # [B, N, H, W, 2]
+    coords = (
+        coordinates.unsqueeze(2).unsqueeze(3).expand(B, N, H, W, 2)
+    )  # [B, N, H, W, 2]
+
+    # gaussian weight for each position
+    dist_sq = ((grid - coords) ** 2).sum(dim=-1)  # [B, N, H, W]
+    weights = torch.exp(-dist_sq / (2 * sigma**2))  # [B, N, H, W]
+
+    # Apply values with attention weights
+    # values_expanded = values.unsqueeze(2).unsqueeze(3).expand(B, N, height, width, channels)
+    # values_expanded = values_expanded.permute(0, 1, 4, 2, 3)  # [B, N, C, H, W]
+    weights_expanded = weights.unsqueeze(2)  # [B, N, 1, H, W]
+
+    # update = (values_expanded * weights_expanded).sum(dim=1)  # [B, C, H, W]
+    update = (1.0 * weights_expanded).sum(dim=1)  # [B, C, H, W]
+
+    return feature_map + update
 
 
 def count_parameters(model: torch.nn.Module) -> int:
