@@ -1,28 +1,18 @@
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
 
 import numpy as np
 import torch
-import wandb
 from omegaconf import OmegaConf
 
 from neuromata.data import DataConfig
 from neuromata.data.mnist import load_mnist
+from neuromata.log import LogConfig, Logger, collage
 from neuromata.model import CAConfig, CAModel
 from neuromata.optim import OptimizerConfig, configure_optimizer
 from neuromata.utils.image import (
-    to_rgb,
-    visualize_batch,
+    to_grayscale,
+    to_pil,
 )
-
-
-@dataclass
-class LogConfig:
-    use_wandb: bool = True
-    wandb_project: str = "neuromata"
-    wandb_run_name: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    loss_log_freq: int = 1
-    vis_log_freq: int = 100
 
 
 @dataclass
@@ -38,105 +28,114 @@ class TrainConfig:
     log: LogConfig = field(default_factory=LogConfig)
 
 
+def eval_step(model: CAModel, x: torch.Tensor, iter_n: int):
+
+    x_pheno_lst = []
+    x_alpha_lst = []
+
+    for _ in np.arange(iter_n):
+
+        x = model(x)
+        pheno = model.express(x)
+        alpha = model.life(x)
+
+        x_pheno_lst.append(pheno.squeeze().detach().cpu().numpy())
+        x_alpha_lst.append(alpha.squeeze().detach().cpu().numpy())
+
+    return x_pheno_lst, x_alpha_lst
+
+
 def train(cfg: TrainConfig):
-
-    if cfg.log.use_wandb:
-        wandb.init(
-            project=cfg.log.wandb_project,
-            name=cfg.log.wandb_run_name,
-            config=asdict(cfg),
-        )
-
-    target_img, target_idx = load_mnist(cfg.data)
-    if cfg.log.use_wandb:
-        wandb.log(
-            {
-                "target_idx": target_idx,
-                "target_img": wandb.Image(
-                    to_rgb(
-                        np.permute_dims(target_img, (1, 2, 0)),
-                        cdims=cfg.model.color_channel_n,
-                    ),
-                    caption="target.jpg",
-                ),
-            },
-            commit=False,
-        )
 
     ca = CAModel(cfg=cfg.model)
     ca.to(cfg.device)
 
     optimizer, scheduler = configure_optimizer(model=ca, cfg=cfg.optim)
 
-    seed = ca.build_seed(target_img)
+    logger = Logger(cfg.log, model=ca, optimizer=optimizer, scheduler=scheduler)
+    logger.init_wandb(exp_cfg=asdict(cfg))
+
+    target_img, target_np = load_mnist(cfg.data)
+    logger.log_image(img=target_img, name="target_img", caption="target_img")
+    seed = ca.build_seed(target_np)
     x0 = np.repeat(seed[None, ...], cfg.batch_size, 0)
-    x0 = torch.tensor(x0)
+    x0 = torch.Tensor(x0).to(cfg.device)
 
     loss_log = []
     for i in range(cfg.n_steps):
 
-        x_target = torch.tensor(target_img[None, ...])
+        x_target = torch.tensor(target_np[None, ...])
         x_target = x_target.to(cfg.device)
 
         x = x0.clone()
-        x = x.to(cfg.device)
 
-        iter_n = np.random.randint(low=64, high=96)
-        for _ in np.arange(iter_n):
+        growth_iter = np.random.randint(low=64, high=96)
+        for _ in np.arange(growth_iter):
             x = ca(x)
 
         loss = ca.loss_f(x, x_target)
 
         optimizer.zero_grad()
         loss.backward()
-        grad_norm = []
+        logger.log_grad()
         for param in ca.parameters():
             if param.grad is not None:
                 grad = param.grad
-                grad_norm.append(grad.norm())
                 norm = grad.norm() + 1e-8
                 param.grad = grad / norm
-            if cfg.log.use_wandb:
-                wandb.log({f"grad_norm/gn-{ii}": gn for ii, gn in enumerate(grad_norm)})
 
         optimizer.step()
         scheduler.step()
-
-        # grads = [g / (tf.norm(g) + 1e-8) for g in grads]
 
         step_i = len(loss_log)
         loss_log.append(loss.detach().cpu().numpy())
 
         if step_i % cfg.log.vis_log_freq == 0:
-            img = visualize_batch(
-                x0.detach().cpu().numpy(),
-                x.detach().cpu().numpy(),
-                cdims=ca.cfg.color_channel_n,
-            )
-            if cfg.log.use_wandb:
-                wandb.log(
-                    {
-                        "img": wandb.Image(
-                            img, caption="train_batches_%04d.jpg" % step_i
-                        )
-                    },
-                    commit=False,
-                )
-        if step_i % cfg.log.loss_log_freq == 0:
-            print(
-                "\r step: %d, log10(loss): %.3f"
-                % (len(loss_log), np.log10(loss_log[-1])),
-                end="",
-            )
-            if cfg.log.use_wandb:
-                wandb.log(
-                    {
-                        "loss": loss_log[-1],
-                        "lr": scheduler.get_last_lr()[-1],
-                    }
-                )
 
-            # export_model(ca, "train_log/%04d.weights.h5" % step_i)
+            batch_size = x0.shape[0]
+            before = ca.express(x0)
+            after = ca.express(x)
+            before = before.squeeze(1).detach().cpu().numpy()
+            after = after.squeeze(1).detach().cpu().numpy()
+            before = [to_grayscale(i) for i in before]
+            after = [to_grayscale(i) for i in after]
+
+            x0_row = collage(before, ncol=batch_size)
+            x_row = collage(after, ncol=batch_size)
+            batch_collage = collage([x0_row, x_row], ncol=1)
+            logger.log_image(
+                img=to_pil(batch_collage),
+                name="train_batch",
+                caption="train_batch_%04d" % step_i,
+            )
+
+        if step_i % cfg.log.eval_log_freq == 0:
+
+            x_pheno_lst, x_alpha_lst = eval_step(
+                model=ca,
+                x=x0[[0], ...],
+                iter_n=growth_iter,
+            )
+            x_pheno_lst = [to_grayscale(i) for i in x_pheno_lst]
+            x_alpha_lst = [to_grayscale(i) for i in x_alpha_lst]
+            evo_pheno = to_pil(collage(x_pheno_lst, ncol=batch_size))
+            evo_alpha = to_pil(collage(x_alpha_lst, ncol=batch_size))
+            logger.log_image(
+                img=evo_pheno,
+                name="evo_phenotype",
+                caption="evo_phenotype_%04d" % step_i,
+            )
+            logger.log_image(
+                img=evo_alpha,
+                name="evo_alpha",
+                caption="evo_alpha_%04d" % step_i,
+            )
+
+        logger.log_metrics(
+            step=step_i,
+            loss=loss_log[-1],
+            growth_iter=growth_iter,
+        )
 
 
 def main():

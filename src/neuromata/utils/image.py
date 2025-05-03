@@ -67,6 +67,28 @@ def load_image(url, max_size):
     return img
 
 
+def to_grayscale(x: np.ndarray) -> np.ndarray:
+
+    x = np.clip(x, 0.0, 1.0) * 255.0
+    x = x.astype(np.uint8)
+
+    return x
+
+
+def to_pil(x: np.ndarray, mode: str = "L") -> PIL.Image.Image:
+
+    return PIL.Image.fromarray(x, mode=mode)
+
+
+def to_channel_first(x: np.ndarray) -> np.ndarray:
+    if x.ndim == 3:
+        return np.transpose(x, (2, 0, 1))
+    elif x.ndim == 4:
+        return np.transpose(x, (0, 3, 1, 2))
+    else:
+        raise ValueError(f"Unknown image shape: {x.shape}")
+
+
 def to_rgb(x: np.ndarray, cdims: int) -> np.ndarray:
 
     if cdims == 3:
@@ -80,10 +102,3 @@ def to_rgb(x: np.ndarray, cdims: int) -> np.ndarray:
         return rgb * a
     else:
         raise ValueError(f"Unknown color channel dimension: {cdims}")
-
-
-def visualize_batch(x0: np.ndarray, x: np.ndarray, cdims: int):
-    vis0 = np.hstack(to_rgb(np.permute_dims(x0, (0, 2, 3, 1)), cdims=cdims))
-    vis1 = np.hstack(to_rgb(np.permute_dims(x, (0, 2, 3, 1)), cdims=cdims))
-    vis = np.vstack([vis0, vis1])
-    return vis

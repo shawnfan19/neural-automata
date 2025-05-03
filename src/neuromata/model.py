@@ -82,6 +82,10 @@ class CAModel(torch.nn.Module):
     def loss_f(self, x: torch.Tensor, pad_target: torch.Tensor) -> torch.Tensor:
 
         x = x[:, : pad_target.shape[1], :, :]
+        pheno = self.express(x)
+        alpha = self.life(x)
+        x = torch.cat([pheno, alpha], dim=1)
+
         batch_pad_target = pad_target.expand(x.shape[0], *pad_target.shape[1:])
 
         return F.mse_loss(x, batch_pad_target, reduction="mean")
@@ -93,6 +97,21 @@ class CAModel(torch.nn.Module):
         )
 
         return y
+
+    def express(self, x: torch.Tensor) -> torch.Tensor:
+
+        pheno = x[:, : self.cfg.color_channel_n, :, :]
+
+        return pheno
+
+    def life(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+
+        alpha = x[:, self.cfg.color_channel_n : self.cfg.color_channel_n + 1, :, :]
+
+        return alpha
 
     def forward(
         self,

@@ -2,7 +2,7 @@ import numpy as np
 from mnist import MNIST
 
 from neuromata.data import DataConfig
-from neuromata.utils.image import np2pil
+from neuromata.utils.image import to_pil
 
 
 class MNISTDataset:
@@ -37,20 +37,16 @@ def load_mnist(cfg: DataConfig):
     target = ds.images[selected_idx]
 
     target = target.reshape(28, 28).astype(np.uint8)
-    target = np.expand_dims(target, axis=-1)
-    target = np.repeat(target, 2, axis=-1)
-    target[..., 1] = (target[..., 0] > 0).astype(np.uint8) * 255
 
-    target_img = np2pil(target)
+    target_img = to_pil(target)
     target_img = target_img.resize((cfg.size, cfg.size))
-    target_img = target_img.convert("LA")
 
-    target_img = np.array(target_img)
-    target_img = target_img.astype("float32") / 255.0
-
-    target_img = np.permute_dims(target_img, (2, 0, 1))
+    target_np = np.array(target_img)
+    phenotype_np = (target_np / 255.0).astype(np.float32)
+    alpha_np = (target_np > 0).astype(np.float32)
+    target_np = np.stack([phenotype_np, alpha_np], axis=0)
 
     p = cfg.pad
-    target_img = np.pad(target_img, [(0, 0), (p, p), (p, p)])
+    target_np = np.pad(target_np, [(0, 0), (p, p), (p, p)])
 
-    return target_img, selected_idx
+    return target_img, target_np
