@@ -9,6 +9,7 @@ import torch.nn.functional as F
 @dataclass
 class CAConfig:
     seed: int = 42
+    phenotype_projector: bool = False
     channel_n: int = 16
     color_channel_n: int = 3
     cell_fire_rate: float = 0.5
@@ -50,7 +51,10 @@ class CAModel(torch.nn.Module):
 
         self.register_buffer("kernel", torch.tensor(kernel, dtype=torch.float32))
 
-        print(f"built model with parameter count: {count_parameters(self)}")
+        self.alpha_slice = slice(self.cfg.color_channel_n, self.cfg.color_channel_n + 1)
+        self.initialize_slice = slice(self.cfg.color_channel_n, None)
+
+        print(f"built CA model with parameter count: {count_parameters(self)}")
 
     def build_seed(self, x: np.ndarray):
 
@@ -58,16 +62,16 @@ class CAModel(torch.nn.Module):
         cent_y, cent_x = h // 2, w // 2
         x0 = np.zeros([self.cfg.channel_n, h, w], np.float32)
         if self.cfg.initialize == "center-point":
-            x0[self.cfg.color_channel_n :, cent_y, cent_x] = 1.0
+            x0[self.initialize_slice, cent_y, cent_x] = 1.0
         elif self.cfg.initialize == "inside-point":
             y_candidates, x_candidates = np.where(x[self.cfg.color_channel_n, :, :] > 0)
             idx = self.rng.choice(len(x_candidates))
-            x0[self.cfg.color_channel_n :, y_candidates[idx], x_candidates[idx]] = 1.0
+            x0[self.initialize_slice, y_candidates[idx], x_candidates[idx]] = 1.0
         elif self.cfg.initialize == "circle":
             y_indices, x_indices = np.ogrid[:h, :w]
             radius = min(h, w) // 2
             mask = ((x_indices - cent_x) ** 2 + (y_indices - cent_y) ** 2) <= radius**2
-            x0[self.cfg.color_channel_n :, mask] = 1.0
+            x0[self.initialize_slice, mask] = 1.0
         else:
             raise ValueError(f"Unknown initialize method: {self.cfg.initialize}")
 
@@ -75,13 +79,12 @@ class CAModel(torch.nn.Module):
 
     def get_living_mask(self, x):
 
-        alpha = x[:, self.cfg.color_channel_n : self.cfg.color_channel_n + 1, :, :]
+        alpha = self.life(x)
 
         return F.max_pool2d(alpha, kernel_size=3, stride=1, padding=1) > 0.1
 
     def loss_f(self, x: torch.Tensor, pad_target: torch.Tensor) -> torch.Tensor:
 
-        x = x[:, : pad_target.shape[1], :, :]
         pheno = self.express(x)
         alpha = self.life(x)
         x = torch.cat([pheno, alpha], dim=1)
@@ -109,7 +112,7 @@ class CAModel(torch.nn.Module):
         x: torch.Tensor,
     ) -> torch.Tensor:
 
-        alpha = x[:, self.cfg.color_channel_n : self.cfg.color_channel_n + 1, :, :]
+        alpha = x[:, self.alpha_slice, :, :]
 
         return alpha
 
@@ -135,6 +138,32 @@ class CAModel(torch.nn.Module):
         life_mask = pre_life_mask & post_life_mask
 
         return x * life_mask.to(torch.float32)
+
+
+class PhenoProjectorCA(CAModel):
+
+    def __init__(self, cfg: CAConfig):
+        super().__init__(cfg=cfg)
+
+        self.phenotype_projector = torch.nn.Sequential(
+            torch.nn.Conv2d(self.cfg.channel_n, 8, kernel_size=1),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(8, 1, kernel_size=1),
+            torch.nn.ReLU(),
+        )
+
+        self.alpha_slice = slice(0, 1)
+        self.initialize_slice = slice(None, None)
+
+        print(
+            f"built CA model + phenotype projector with parameter count: {count_parameters(self)}"
+        )
+
+    def express(self, x: torch.Tensor) -> torch.Tensor:
+
+        pheno = self.phenotype_projector(x)
+
+        return pheno
 
 
 def count_parameters(model: torch.nn.Module) -> int:

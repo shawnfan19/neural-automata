@@ -7,7 +7,7 @@ from omegaconf import OmegaConf
 from neuromata.data import DataConfig
 from neuromata.data.mnist import load_mnist
 from neuromata.log import LogConfig, Logger, collage
-from neuromata.model import CAConfig, CAModel
+from neuromata.model import CAConfig, CAModel, PhenoProjectorCA
 from neuromata.optim import OptimizerConfig, configure_optimizer
 from neuromata.utils.image import (
     to_grayscale,
@@ -47,7 +47,10 @@ def eval_step(model: CAModel, x: torch.Tensor, iter_n: int):
 
 def train(cfg: TrainConfig):
 
-    ca = CAModel(cfg=cfg.model)
+    if cfg.model.phenotype_projector:
+        ca = PhenoProjectorCA(cfg=cfg.model)
+    else:
+        ca = CAModel(cfg=cfg.model)
     ca.to(cfg.device)
 
     optimizer, scheduler = configure_optimizer(model=ca, cfg=cfg.optim)
