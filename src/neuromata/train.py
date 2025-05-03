@@ -60,17 +60,16 @@ def train(cfg: TrainConfig):
 
     target_img, target_np = load_mnist(cfg.data)
     logger.log_image(img=target_img, name="target_img", caption="target_img")
-    seed = ca.build_seed(target_np)
-    x0 = np.repeat(seed[None, ...], cfg.batch_size, 0)
-    x0 = torch.Tensor(x0).to(cfg.device)
 
     loss_log = []
     for i in range(cfg.n_steps):
 
         x_target = torch.tensor(target_np[None, ...])
+        x_target = x_target.repeat(cfg.batch_size, 1, 1, 1)
         x_target = x_target.to(cfg.device)
 
-        x = x0.clone()
+        x0 = ca.build_seed(x_target)
+        x = x0
 
         growth_iter = np.random.randint(low=64, high=96)
         for _ in np.arange(growth_iter):

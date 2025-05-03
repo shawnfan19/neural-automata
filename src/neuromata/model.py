@@ -22,8 +22,6 @@ class CAModel(torch.nn.Module):
         super().__init__()
         self.cfg = cfg
 
-        self.rng = np.random.default_rng(cfg.seed)
-
         self.update_rule = torch.nn.Sequential(
             torch.nn.Conv2d(self.cfg.channel_n * 3, 128, kernel_size=1),
             torch.nn.ReLU(),
@@ -56,22 +54,23 @@ class CAModel(torch.nn.Module):
 
         print(f"built CA model with parameter count: {count_parameters(self)}")
 
-    def build_seed(self, x: np.ndarray):
+    def build_seed(self, x: torch.Tensor) -> torch.Tensor:
 
-        _, h, w = x.shape
+        b, _, h, w = x.shape
         cent_y, cent_x = h // 2, w // 2
-        x0 = np.zeros([self.cfg.channel_n, h, w], np.float32)
+        x0 = torch.zeros(b, self.cfg.channel_n, h, w, device=x.device)
         if self.cfg.initialize == "center-point":
-            x0[self.initialize_slice, cent_y, cent_x] = 1.0
+            x0[:, self.initialize_slice, cent_y, cent_x] = 1.0
         elif self.cfg.initialize == "inside-point":
-            y_candidates, x_candidates = np.where(x[self.cfg.color_channel_n, :, :] > 0)
-            idx = self.rng.choice(len(x_candidates))
-            x0[self.initialize_slice, y_candidates[idx], x_candidates[idx]] = 1.0
+            y_coords, x_coords = torch.where(x[0, self.cfg.color_channel_n, :, :] > 0)
+            rng = np.random.default_rng(self.cfg.seed)
+            idx = rng.choice(len(x_coords))
+            x0[:, self.initialize_slice, y_coords[idx], x_coords[idx]] = 1.0
         elif self.cfg.initialize == "circle":
             y_indices, x_indices = np.ogrid[:h, :w]
             radius = min(h, w) // 2
             mask = ((x_indices - cent_x) ** 2 + (y_indices - cent_y) ** 2) <= radius**2
-            x0[self.initialize_slice, mask] = 1.0
+            x0[:, self.initialize_slice, mask] = 1.0
         else:
             raise ValueError(f"Unknown initialize method: {self.cfg.initialize}")
 
