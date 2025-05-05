@@ -7,7 +7,7 @@ from omegaconf import OmegaConf
 from neuromata.data import DataConfig
 from neuromata.data.mnist import load_mnist
 from neuromata.log import LogConfig, Logger, collage
-from neuromata.model import AutoencodeCA, CAConfig, CAModel, PhenoProjectorCA
+from neuromata.model import CAConfig, CAModel
 from neuromata.optim import OptimizerConfig, configure_optimizer
 from neuromata.utils.image import (
     to_grayscale,
