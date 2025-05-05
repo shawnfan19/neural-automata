@@ -10,6 +10,8 @@ import torch.nn.functional as F
 @dataclass
 class CAConfig:
     seed: int = 42
+    life_projector: bool = False
+    zero_init_life_projector: str = "zero"
     phenotype_projector: bool = False
     channel_n: int = 16
     color_channel_n: int = 3
@@ -56,14 +58,30 @@ class CAModel(torch.nn.Module):
                 torch.nn.Conv2d(8, 1, kernel_size=1),
                 torch.nn.ReLU(),
             )
-            self.alpha_slice = slice(0, 1)
+            print(f"phenotype projector: {count_parameters(self.express)}")
+            self.life = partial(slice_color_channels, channel_slice=slice(0, 1))
             self.initialize_slice = slice(None, None)
         else:
-            self.express = partial(slice_color_channels, channel_n=cfg.color_channel_n)
-            self.alpha_slice = slice(
-                self.cfg.color_channel_n, self.cfg.color_channel_n + 1
+            self.express = partial(
+                slice_color_channels, channel_slice=slice(None, cfg.color_channel_n)
+            )
+            self.life = partial(
+                slice_color_channels,
+                channel_slice=slice(cfg.color_channel_n, self.cfg.color_channel_n + 1),
             )
             self.initialize_slice = slice(self.cfg.color_channel_n, None)
+
+        if cfg.life_projector:
+            self.life = torch.nn.Sequential(
+                torch.nn.Conv2d(self.cfg.channel_n, 8, kernel_size=1, bias=False),
+                torch.nn.ReLU(),
+                torch.nn.Conv2d(8, 1, kernel_size=1, bias=False),
+            )
+            if cfg.zero_init_life_projector:
+                torch.nn.init.constant_(self.life[2].weight, 0)  # type: ignore
+            else:
+                torch.nn.init.xavier_uniform_(self.life[2].weight)  # type: ignore
+            print(f" – life projector: {count_parameters(self.life)}")
 
         if cfg.initialize == "autoencode":
             self.seed_pos_encoder = torch.nn.Sequential(
@@ -74,8 +92,13 @@ class CAModel(torch.nn.Module):
                 torch.nn.Conv2d(8, 1, kernel_size=3, stride=1, padding=1),
                 torch.nn.ReLU(),
             )
+            print(
+                f" – seed position encoder: {count_parameters(self.seed_pos_encoder)}"
+            )
 
-        self.summary()
+        print(
+            f"built cellular automaton with parameter count: {count_parameters(self)}"
+        )
 
     def build_seed(self, x: torch.Tensor) -> torch.Tensor:
 
@@ -132,15 +155,6 @@ class CAModel(torch.nn.Module):
 
         return y
 
-    def life(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-
-        alpha = x[:, self.alpha_slice, :, :]
-
-        return alpha
-
     def forward(
         self,
         x: torch.Tensor,
@@ -163,17 +177,6 @@ class CAModel(torch.nn.Module):
         life_mask = pre_life_mask & post_life_mask
 
         return x * life_mask.to(torch.float32)
-
-    def summary(self):
-        print(
-            f"built cellular automaton with parameter count: {count_parameters(self)}"
-        )
-        if self.cfg.initialize == "autoencode":
-            print(
-                f" – seed position encoder: {count_parameters(self.seed_pos_encoder)}"
-            )
-        if self.cfg.phenotype_projector:
-            print(f" – phenotype projector: {count_parameters(self.express)}")
 
 
 def soft_argmax_2d(heatmaps: torch.Tensor) -> torch.Tensor:
@@ -252,9 +255,9 @@ def plant_seed_differentiably(
     return feature_map + update
 
 
-def slice_color_channels(x: torch.Tensor, channel_n: int) -> torch.Tensor:
+def slice_color_channels(x: torch.Tensor, channel_slice: slice) -> torch.Tensor:
 
-    return x[:, :channel_n, :, :]
+    return x[:, channel_slice, :, :]
 
 
 def count_parameters(model: torch.nn.Module) -> int:
