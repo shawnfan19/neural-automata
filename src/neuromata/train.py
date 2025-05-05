@@ -47,12 +47,7 @@ def eval_step(model: CAModel, x: torch.Tensor, iter_n: int):
 
 def train(cfg: TrainConfig):
 
-    if cfg.model.phenotype_projector:
-        ca = PhenoProjectorCA(cfg=cfg.model)
-    elif cfg.model.autoencode_seed:
-        ca = AutoencodeCA(cfg=cfg.model)
-    else:
-        ca = CAModel(cfg=cfg.model)
+    ca = CAModel(cfg=cfg.model)
     ca.to(cfg.device)
 
     optimizer, scheduler = configure_optimizer(model=ca, cfg=cfg.optim)

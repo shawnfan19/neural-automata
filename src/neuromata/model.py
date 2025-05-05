@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import partial
 from typing import Optional
 
 import numpy as np
@@ -9,7 +10,6 @@ import torch.nn.functional as F
 @dataclass
 class CAConfig:
     seed: int = 42
-    autoencode_seed: bool = False
     phenotype_projector: bool = False
     channel_n: int = 16
     color_channel_n: int = 3
@@ -47,20 +47,42 @@ class CAModel(torch.nn.Module):
             :, None, :, :
         ]
         kernel = np.tile(kernel, (self.cfg.channel_n, 1, 1, 1))
-
         self.register_buffer("kernel", torch.tensor(kernel, dtype=torch.float32))
 
-        self.alpha_slice = slice(self.cfg.color_channel_n, self.cfg.color_channel_n + 1)
-        self.initialize_slice = slice(self.cfg.color_channel_n, None)
+        if cfg.phenotype_projector:
+            self.express = torch.nn.Sequential(
+                torch.nn.Conv2d(self.cfg.channel_n, 8, kernel_size=1),
+                torch.nn.ReLU(),
+                torch.nn.Conv2d(8, 1, kernel_size=1),
+                torch.nn.ReLU(),
+            )
+            self.alpha_slice = slice(0, 1)
+            self.initialize_slice = slice(None, None)
+        else:
+            self.express = partial(slice_color_channels, channel_n=cfg.color_channel_n)
+            self.alpha_slice = slice(
+                self.cfg.color_channel_n, self.cfg.color_channel_n + 1
+            )
+            self.initialize_slice = slice(self.cfg.color_channel_n, None)
 
-        print(f"built CA model with parameter count: {count_parameters(self)}")
+        if cfg.initialize == "autoencode":
+            self.seed_pos_encoder = torch.nn.Sequential(
+                torch.nn.Conv2d(
+                    self.cfg.color_channel_n + 1, 8, kernel_size=3, stride=1, padding=1
+                ),
+                torch.nn.ReLU(),
+                torch.nn.Conv2d(8, 1, kernel_size=3, stride=1, padding=1),
+                torch.nn.ReLU(),
+            )
+
+        self.summary()
 
     def build_seed(self, x: torch.Tensor) -> torch.Tensor:
 
         b, _, h, w = x.shape
-        cent_y, cent_x = h // 2, w // 2
         x0 = torch.zeros(b, self.cfg.channel_n, h, w, device=x.device)
         if self.cfg.initialize == "center-point":
+            cent_y, cent_x = h // 2, w // 2
             x0[:, self.initialize_slice, cent_y, cent_x] = 1.0
         elif self.cfg.initialize == "inside-point":
             y_coords, x_coords = torch.where(x[0, self.cfg.color_channel_n, :, :] > 0)
@@ -68,10 +90,19 @@ class CAModel(torch.nn.Module):
             idx = rng.choice(len(x_coords))
             x0[:, self.initialize_slice, y_coords[idx], x_coords[idx]] = 1.0
         elif self.cfg.initialize == "circle":
+            cent_y, cent_x = h // 2, w // 2
             y_indices, x_indices = np.ogrid[:h, :w]
             radius = min(h, w) // 2
             mask = ((x_indices - cent_x) ** 2 + (y_indices - cent_y) ** 2) <= radius**2
             x0[:, self.initialize_slice, mask] = 1.0
+        elif self.cfg.initialize == "autoencode":
+            pos_heatmap = self.seed_pos_encoder(x)
+            seed_coords = soft_argmax_2d(pos_heatmap)
+            x0 = plant_seed_differentiably(
+                feature_map=x0,
+                coordinates=seed_coords,
+                sigma=1.0,
+            )
         else:
             raise ValueError(f"Unknown initialize method: {self.cfg.initialize}")
 
@@ -100,12 +131,6 @@ class CAModel(torch.nn.Module):
         )
 
         return y
-
-    def express(self, x: torch.Tensor) -> torch.Tensor:
-
-        pheno = x[:, : self.cfg.color_channel_n, :, :]
-
-        return pheno
 
     def life(
         self,
@@ -139,66 +164,16 @@ class CAModel(torch.nn.Module):
 
         return x * life_mask.to(torch.float32)
 
-
-class AutoencodeCA(CAModel):
-
-    def __init__(self, cfg: CAConfig):
-        super().__init__(cfg=cfg)
-
-        self.seed_pos_encoder = torch.nn.Sequential(
-            torch.nn.Conv2d(
-                self.cfg.color_channel_n + 1, 8, kernel_size=3, stride=1, padding=1
-            ),
-            torch.nn.ReLU(),
-            torch.nn.Conv2d(8, 1, kernel_size=3, stride=1, padding=1),
-            torch.nn.ReLU(),
-        )
-
+    def summary(self):
         print(
-            f"built CA model + autoencoder with parameter count: {count_parameters(self)}"
+            f"built cellular automaton with parameter count: {count_parameters(self)}"
         )
-
-    def build_seed(self, x: torch.Tensor) -> torch.Tensor:
-
-        b, _, h, w = x.shape
-        x0 = torch.zeros(b, self.cfg.channel_n, h, w, device=x.device)
-
-        pos_heatmap = self.seed_pos_encoder(x)
-        seed_coords = soft_argmax_2d(pos_heatmap)
-
-        x0 = plant_seed_differentiably(
-            feature_map=x0,
-            coordinates=seed_coords,
-            sigma=1.0,
-        )
-
-        return x0
-
-
-class PhenoProjectorCA(CAModel):
-
-    def __init__(self, cfg: CAConfig):
-        super().__init__(cfg=cfg)
-
-        self.phenotype_projector = torch.nn.Sequential(
-            torch.nn.Conv2d(self.cfg.channel_n, 8, kernel_size=1),
-            torch.nn.ReLU(),
-            torch.nn.Conv2d(8, 1, kernel_size=1),
-            torch.nn.ReLU(),
-        )
-
-        self.alpha_slice = slice(0, 1)
-        self.initialize_slice = slice(None, None)
-
-        print(
-            f"built CA model + phenotype projector with parameter count: {count_parameters(self)}"
-        )
-
-    def express(self, x: torch.Tensor) -> torch.Tensor:
-
-        pheno = self.phenotype_projector(x)
-
-        return pheno
+        if self.cfg.initialize == "autoencode":
+            print(
+                f" – seed position encoder: {count_parameters(self.seed_pos_encoder)}"
+            )
+        if self.cfg.phenotype_projector:
+            print(f" – phenotype projector: {count_parameters(self.express)}")
 
 
 def soft_argmax_2d(heatmaps: torch.Tensor) -> torch.Tensor:
@@ -275,6 +250,11 @@ def plant_seed_differentiably(
     update = (1.0 * weights_expanded).sum(dim=1)  # [B, C, H, W]
 
     return feature_map + update
+
+
+def slice_color_channels(x: torch.Tensor, channel_n: int) -> torch.Tensor:
+
+    return x[:, :channel_n, :, :]
 
 
 def count_parameters(model: torch.nn.Module) -> int:
