@@ -61,6 +61,7 @@ class CAModel(torch.nn.Module):
             print(f"phenotype projector: {count_parameters(self.express)}")
             self.life = partial(slice_color_channels, channel_slice=slice(0, 1))
             self.initialize_slice = slice(None, None)
+            self.initialize_length = self.cfg.channel_n
         else:
             self.express = partial(
                 slice_color_channels, channel_slice=slice(None, cfg.color_channel_n)
@@ -70,6 +71,7 @@ class CAModel(torch.nn.Module):
                 channel_slice=slice(cfg.color_channel_n, self.cfg.color_channel_n + 1),
             )
             self.initialize_slice = slice(self.cfg.color_channel_n, None)
+            self.initialize_length = self.cfg.channel_n - self.cfg.color_channel_n
 
         if cfg.life_projector:
             self.life = torch.nn.Sequential(
@@ -95,6 +97,16 @@ class CAModel(torch.nn.Module):
             print(
                 f" – seed position encoder: {count_parameters(self.seed_pos_encoder)}"
             )
+            self.seed_vec_encoder = torch.nn.Sequential(
+                torch.nn.Conv2d(
+                    self.cfg.color_channel_n + 1, 8, kernel_size=3, stride=1, padding=1
+                ),
+                torch.nn.ReLU(),
+                torch.nn.Conv2d(
+                    8, self.initialize_length, kernel_size=3, stride=1, padding=1
+                ),
+            )
+            print(f" – seed vector encoder: {count_parameters(self.seed_pos_encoder)}")
 
         print(
             f"built cellular automaton with parameter count: {count_parameters(self)}"
@@ -119,11 +131,15 @@ class CAModel(torch.nn.Module):
             mask = ((x_indices - cent_x) ** 2 + (y_indices - cent_y) ** 2) <= radius**2
             x0[:, self.initialize_slice, mask] = 1.0
         elif self.cfg.initialize == "autoencode":
-            pos_heatmap = self.seed_pos_encoder(x)
-            seed_coords = soft_argmax_2d(pos_heatmap)
+            seed_pos_heatmap = self.seed_pos_encoder(x)
+            seed_coords = soft_argmax_2d(seed_pos_heatmap)
+            seed_values = self.seed_vec_encoder(x)
+            seed_values = torch.mean(seed_values, dim=(2, 3))
+            seed_values = seed_values.unsqueeze(1)
             x0 = plant_seed_differentiably(
                 feature_map=x0,
-                coordinates=seed_coords,
+                seed_coords=seed_coords,
+                seed_values=seed_values,
                 sigma=1.0,
             )
         else:
@@ -213,7 +229,10 @@ def soft_argmax_2d(heatmaps: torch.Tensor) -> torch.Tensor:
 
 
 def plant_seed_differentiably(
-    feature_map: torch.Tensor, coordinates: torch.Tensor, sigma: float = 1.0
+    feature_map: torch.Tensor,
+    seed_coords: torch.Tensor,
+    seed_values: torch.Tensor,
+    sigma: float = 1.0,
 ):
     """
     Write values to feature map using differentiable Gaussian attention.
@@ -224,20 +243,20 @@ def plant_seed_differentiably(
         values: [B, N, C] tensor of values to write
         sigma: Width of Gaussian kernel
     """
-    _, channels, H, W = feature_map.shape
-    B, N, _ = coordinates.shape
+    _, C, H, W = feature_map.shape
+    B, N, _ = seed_coords.shape
 
     # Create coordinate grid
     y_grid, x_grid = torch.meshgrid(
-        torch.arange(H, device=coordinates.device),
-        torch.arange(W, device=coordinates.device),
+        torch.arange(H, device=seed_coords.device),
+        torch.arange(W, device=seed_coords.device),
     )
     grid = torch.stack([x_grid, y_grid], dim=-1).float()  # [H, W, 2]
 
     # Expand grid and coordinates
     grid = grid.unsqueeze(0).unsqueeze(1).expand(B, N, H, W, 2)  # [B, N, H, W, 2]
     coords = (
-        coordinates.unsqueeze(2).unsqueeze(3).expand(B, N, H, W, 2)
+        seed_coords.unsqueeze(2).unsqueeze(3).expand(B, N, H, W, 2)
     )  # [B, N, H, W, 2]
 
     # gaussian weight for each position
@@ -245,11 +264,11 @@ def plant_seed_differentiably(
     weights = torch.exp(-dist_sq / (2 * sigma**2))  # [B, N, H, W]
 
     # Apply values with attention weights
-    # values_expanded = values.unsqueeze(2).unsqueeze(3).expand(B, N, height, width, channels)
-    # values_expanded = values_expanded.permute(0, 1, 4, 2, 3)  # [B, N, C, H, W]
+    values_expanded = seed_values.unsqueeze(2).unsqueeze(3).expand(B, N, H, W, C)
+    values_expanded = values_expanded.permute(0, 1, 4, 2, 3)  # [B, N, C, H, W]
     weights_expanded = weights.unsqueeze(2)  # [B, N, 1, H, W]
 
-    # update = (values_expanded * weights_expanded).sum(dim=1)  # [B, C, H, W]
+    update = (values_expanded * weights_expanded).sum(dim=1)  # [B, C, H, W]
     update = (1.0 * weights_expanded).sum(dim=1)  # [B, C, H, W]
 
     return feature_map + update
