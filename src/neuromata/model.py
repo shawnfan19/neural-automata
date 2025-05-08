@@ -58,7 +58,7 @@ class CAModel(torch.nn.Module):
                 torch.nn.Conv2d(8, 1, kernel_size=1),
                 torch.nn.ReLU(),
             )
-            print(f"phenotype projector: {count_parameters(self.express)}")
+            print(f"built phenotype projector: {count_parameters(self.express)}")
             self.life = partial(slice_color_channels, channel_slice=slice(0, 1))
             self.initialize_slice = slice(None, None)
             self.initialize_length = self.cfg.channel_n
@@ -83,7 +83,7 @@ class CAModel(torch.nn.Module):
                 torch.nn.init.constant_(self.life[2].weight, 0)  # type: ignore
             else:
                 torch.nn.init.xavier_uniform_(self.life[2].weight)  # type: ignore
-            print(f" – life projector: {count_parameters(self.life)}")
+            print(f"built life projector: {count_parameters(self.life)}")
 
         if cfg.initialize == "autoencode":
             self.seed_pos_encoder = torch.nn.Sequential(
@@ -95,7 +95,7 @@ class CAModel(torch.nn.Module):
                 torch.nn.ReLU(),
             )
             print(
-                f" – seed position encoder: {count_parameters(self.seed_pos_encoder)}"
+                f"built seed position encoder: {count_parameters(self.seed_pos_encoder)}"
             )
             self.seed_vec_encoder = torch.nn.Sequential(
                 torch.nn.Conv2d(
@@ -103,49 +103,86 @@ class CAModel(torch.nn.Module):
                 ),
                 torch.nn.ReLU(),
                 torch.nn.Conv2d(
-                    8, self.initialize_length, kernel_size=3, stride=1, padding=1
+                    8, self.initialize_length - 1, kernel_size=3, stride=1, padding=1
                 ),
+                torch.nn.ReLU(),
             )
-            print(f" – seed vector encoder: {count_parameters(self.seed_pos_encoder)}")
+            print(
+                f"built seed vector encoder: {count_parameters(self.seed_pos_encoder)}"
+            )
 
         print(
             f"built cellular automaton with parameter count: {count_parameters(self)}"
         )
 
-    def build_seed(self, x: torch.Tensor) -> torch.Tensor:
+    def build_seed(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 
         b, _, h, w = x.shape
         x0 = torch.zeros(b, self.cfg.channel_n, h, w, device=x.device)
         if self.cfg.initialize == "center-point":
+            seed_values = torch.ones(b, self.initialize_length, device=x.device)
             cent_y, cent_x = h // 2, w // 2
-            x0[:, self.initialize_slice, cent_y, cent_x] = 1.0
+            x0[:, self.initialize_slice, cent_y, cent_x] = seed_values
+            seed_x = torch.tensor([cent_x], device=x.device).repeat(b)
+            seed_y = torch.tensor([cent_y], device=x.device).repeat(b)
         elif self.cfg.initialize == "inside-point":
+            seed_values = torch.ones(b, self.initialize_length, device=x.device)
             y_coords, x_coords = torch.where(x[0, self.cfg.color_channel_n, :, :] > 0)
             rng = np.random.default_rng(self.cfg.seed)
             idx = rng.choice(len(x_coords))
-            x0[:, self.initialize_slice, y_coords[idx], x_coords[idx]] = 1.0
+            x0[:, self.initialize_slice, y_coords[idx], x_coords[idx]] = seed_values
+            seed_x = x_coords[idx].unsqueeze(0).repeat(b)
+            seed_y = y_coords[idx].unsqueeze(0).repeat(b)
         elif self.cfg.initialize == "circle":
+            seed_values = torch.ones(b, self.initialize_length, device=x.device)
             cent_y, cent_x = h // 2, w // 2
             y_indices, x_indices = np.ogrid[:h, :w]
             radius = min(h, w) // 2
             mask = ((x_indices - cent_x) ** 2 + (y_indices - cent_y) ** 2) <= radius**2
-            x0[:, self.initialize_slice, mask] = 1.0
+            x0[:, self.initialize_slice, mask] = seed_values.unsqueeze(-1)
         elif self.cfg.initialize == "autoencode":
             seed_pos_heatmap = self.seed_pos_encoder(x)
             seed_coords = soft_argmax_2d(seed_pos_heatmap)
+
             seed_values = self.seed_vec_encoder(x)
             seed_values = torch.mean(seed_values, dim=(2, 3))
+            seed_base = torch.ones(b, self.initialize_length - 1, device=x.device)
+            seed_values = seed_values + seed_base
             seed_values = seed_values.unsqueeze(1)
-            x0 = plant_seed_differentiably(
-                feature_map=x0,
+
+            seed_alpha = torch.ones(b, 1, device=x.device)
+            seed_alpha = seed_alpha.unsqueeze(1)
+
+            start = (
+                self.initialize_slice.start + 1
+                if self.initialize_slice.start is not None
+                else 1
+            )
+            stop = self.initialize_slice.stop
+            x0_seed = plant_seed_differentiably(
+                feature_map=x0[:, slice(start, stop), ...],
                 seed_coords=seed_coords,
                 seed_values=seed_values,
                 sigma=1.0,
             )
+            x0_seed = x0_seed / torch.max(x0_seed)
+            x0_alpha = plant_seed_differentiably(
+                feature_map=x0[:, slice(0, 1), ...],
+                seed_coords=seed_coords,
+                seed_values=seed_alpha,
+                sigma=1.0,
+            )
+
+            x0 = torch.cat([x0_seed, x0_alpha], dim=1)
+
+            seed_x = seed_coords[:, :, 0].squeeze(1)
+            seed_y = seed_coords[:, :, 1].squeeze(1)
         else:
             raise ValueError(f"Unknown initialize method: {self.cfg.initialize}")
 
-        return x0
+        return x0, seed_values, seed_x, seed_y
 
     def get_living_mask(self, x):
 
@@ -269,7 +306,6 @@ def plant_seed_differentiably(
     weights_expanded = weights.unsqueeze(2)  # [B, N, 1, H, W]
 
     update = (values_expanded * weights_expanded).sum(dim=1)  # [B, C, H, W]
-    update = (1.0 * weights_expanded).sum(dim=1)  # [B, C, H, W]
 
     return feature_map + update
 

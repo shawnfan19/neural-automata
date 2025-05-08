@@ -65,7 +65,7 @@ def train(cfg: TrainConfig):
         x_target = x_target.repeat(cfg.batch_size, 1, 1, 1)
         x_target = x_target.to(cfg.device)
 
-        x0 = ca.build_seed(x_target)
+        x0, seed_values, seed_x, seed_y = ca.build_seed(x_target)
         x = x0
 
         growth_iter = np.random.randint(low=64, high=96)
@@ -110,6 +110,12 @@ def train(cfg: TrainConfig):
 
         if step_i % cfg.log.eval_log_freq == 0:
 
+            logger.log_tensor(tensor=seed_x.detach().cpu().numpy(), name="seed_x")
+            logger.log_tensor(tensor=seed_y.detach().cpu().numpy(), name="seed_y")
+            logger.log_tensor(
+                tensor=seed_values.squeeze(1).detach().cpu().numpy(),
+                name="seed_tensor",
+            )
             x_pheno_lst, x_alpha_lst = eval_step(
                 model=ca,
                 x=x0[[0], ...],

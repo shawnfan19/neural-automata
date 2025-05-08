@@ -59,6 +59,20 @@ class Logger:
                 commit=False,
             )
 
+    def log_tensor(self, tensor: np.ndarray, name: str = "tensor"):
+
+        if self.cfg.use_wandb:
+            wandb.log(
+                {
+                    f"{name}": wandb.Histogram(tensor.tolist()),
+                    f"{name}/mean": np.mean(tensor, axis=-1),
+                    f"{name}/std": np.std(tensor, axis=-1),
+                    f"{name}/min": np.min(tensor, axis=-1),
+                    f"{name}/max": np.max(tensor, axis=-1),
+                },
+                commit=False,
+            )
+
     def log_grad(self):
         if self.cfg.use_wandb:
             for name, param in self.model.named_parameters():
