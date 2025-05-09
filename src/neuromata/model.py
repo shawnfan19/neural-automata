@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Optional
 
@@ -6,110 +6,82 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from neuromata.kernel import KernelConfig, sobel_kernel
+
 
 @dataclass
 class CAConfig:
     seed: int = 42
     life_projector: bool = False
-    zero_init_life_projector: str = "zero"
+    lifeless: bool = False
     phenotype_projector: bool = False
     channel_n: int = 16
     color_channel_n: int = 3
     cell_fire_rate: float = 0.5
     initialize: str = "center-point"
+    learn_step_size: bool = False
+    step_size: float = 1.0
+    kernel: KernelConfig = field(default_factory=KernelConfig)
 
 
-class CAModel(torch.nn.Module):
+class Automaton(torch.nn.Module):
 
     def __init__(self, cfg: CAConfig):
         super().__init__()
         self.cfg = cfg
 
         self.update_rule = torch.nn.Sequential(
-            torch.nn.Conv2d(self.cfg.channel_n * 3, 128, kernel_size=1),
+            torch.nn.Conv2d(self.cfg.channel_n * 3, 128, kernel_size=1, bias=False),
             torch.nn.ReLU(),
-            torch.nn.Conv2d(128, self.cfg.channel_n, kernel_size=1),
+            torch.nn.Conv2d(128, self.cfg.channel_n, kernel_size=1, bias=False),
         )
 
-        torch.nn.init.xavier_uniform_(self.update_rule[0].weight)  # type: ignore
-        torch.nn.init.constant_(self.update_rule[0].bias, 0)  # type: ignore
-        torch.nn.init.constant_(self.update_rule[2].weight, 0)  # type: ignore
-        torch.nn.init.constant_(self.update_rule[2].bias, 0)  # type: ignore
-
-        angle = 0.0
-
-        identify = np.array([0, 1, 0]).astype(np.float32)
-        identify = np.outer(identify, identify)
-
-        dx = np.outer([1, 2, 1], [-1, 0, 1]) / 8.0  # Sobel filter
-        dy = dx.T
-        c, s = np.cos(angle), np.sin(angle)
-
-        kernel = np.stack([identify, c * dx - s * dy, s * dx + c * dy], axis=0)[
-            :, None, :, :
-        ]
+        kernel = sobel_kernel(cfg.kernel)
         kernel = np.tile(kernel, (self.cfg.channel_n, 1, 1, 1))
         self.register_buffer("kernel", torch.tensor(kernel, dtype=torch.float32))
 
         if cfg.phenotype_projector:
             self.express = torch.nn.Sequential(
-                torch.nn.Conv2d(self.cfg.channel_n, 8, kernel_size=1),
+                torch.nn.Conv2d(self.cfg.channel_n, 8, kernel_size=1, bias=False),
                 torch.nn.ReLU(),
-                torch.nn.Conv2d(8, 1, kernel_size=1),
+                torch.nn.Conv2d(8, 1, kernel_size=1, bias=False),
                 torch.nn.ReLU(),
             )
+            for param in self.express.parameters():
+                param.requires_grad = False
+
             print(f"built phenotype projector: {count_parameters(self.express)}")
-            self.life = partial(slice_color_channels, channel_slice=slice(0, 1))
             self.initialize_slice = slice(None, None)
             self.initialize_length = self.cfg.channel_n
         else:
             self.express = partial(
                 slice_color_channels, channel_slice=slice(None, cfg.color_channel_n)
             )
-            self.life = partial(
-                slice_color_channels,
-                channel_slice=slice(cfg.color_channel_n, self.cfg.color_channel_n + 1),
-            )
             self.initialize_slice = slice(self.cfg.color_channel_n, None)
             self.initialize_length = self.cfg.channel_n - self.cfg.color_channel_n
 
-        if cfg.life_projector:
-            self.life = torch.nn.Sequential(
-                torch.nn.Conv2d(self.cfg.channel_n, 8, kernel_size=1, bias=False),
-                torch.nn.ReLU(),
-                torch.nn.Conv2d(8, 1, kernel_size=1, bias=False),
-            )
-            if cfg.zero_init_life_projector:
-                torch.nn.init.constant_(self.life[2].weight, 0)  # type: ignore
+        if cfg.lifeless:
+            self.life = always_alive
+        else:
+            if cfg.life_projector:
+                self.life = torch.nn.Sequential(
+                    torch.nn.Conv2d(self.cfg.channel_n, 8, kernel_size=1, bias=False),
+                    torch.nn.ReLU(),
+                    torch.nn.Conv2d(8, 1, kernel_size=1, bias=False),
+                )
+                print(f"built life projector: {count_parameters(self.life)}")
             else:
-                torch.nn.init.xavier_uniform_(self.life[2].weight)  # type: ignore
-            print(f"built life projector: {count_parameters(self.life)}")
+                if cfg.phenotype_projector:
+                    self.life = partial(slice_color_channels, channel_slice=slice(0, 1))
+                else:
+                    self.life = partial(
+                        slice_color_channels,
+                        channel_slice=slice(
+                            cfg.color_channel_n, self.cfg.color_channel_n + 1
+                        ),
+                    )
 
-        if cfg.initialize == "autoencode":
-            self.seed_pos_encoder = torch.nn.Sequential(
-                torch.nn.Conv2d(
-                    self.cfg.color_channel_n + 1, 8, kernel_size=3, stride=1, padding=1
-                ),
-                torch.nn.ReLU(),
-                torch.nn.Conv2d(8, 1, kernel_size=3, stride=1, padding=1),
-                torch.nn.ReLU(),
-            )
-            print(
-                f"built seed position encoder: {count_parameters(self.seed_pos_encoder)}"
-            )
-            self.seed_vec_encoder = torch.nn.Sequential(
-                torch.nn.Conv2d(
-                    self.cfg.color_channel_n + 1, 8, kernel_size=3, stride=1, padding=1
-                ),
-                torch.nn.ReLU(),
-                torch.nn.Conv2d(
-                    8, self.initialize_length - 1, kernel_size=3, stride=1, padding=1
-                ),
-                torch.nn.ReLU(),
-            )
-            print(
-                f"built seed vector encoder: {count_parameters(self.seed_pos_encoder)}"
-            )
+        self.step_size = lambda x: torch.tensor(self.cfg.step_size, device=x.device)
 
         print(
             f"built cellular automaton with parameter count: {count_parameters(self)}"
@@ -119,66 +91,26 @@ class CAModel(torch.nn.Module):
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 
+        torch.manual_seed(self.cfg.seed)
+        torch.cuda.manual_seed(self.cfg.seed)
+
+        seed_values = torch.rand(self.initialize_length, device=x.device)
+        seed_values = seed_values.unsqueeze(0).expand(x.shape[0], -1)
+
         b, _, h, w = x.shape
         x0 = torch.zeros(b, self.cfg.channel_n, h, w, device=x.device)
         if self.cfg.initialize == "center-point":
-            seed_values = torch.ones(b, self.initialize_length, device=x.device)
             cent_y, cent_x = h // 2, w // 2
             x0[:, self.initialize_slice, cent_y, cent_x] = seed_values
             seed_x = torch.tensor([cent_x], device=x.device).repeat(b)
             seed_y = torch.tensor([cent_y], device=x.device).repeat(b)
         elif self.cfg.initialize == "inside-point":
-            seed_values = torch.ones(b, self.initialize_length, device=x.device)
             y_coords, x_coords = torch.where(x[0, self.cfg.color_channel_n, :, :] > 0)
             rng = np.random.default_rng(self.cfg.seed)
             idx = rng.choice(len(x_coords))
             x0[:, self.initialize_slice, y_coords[idx], x_coords[idx]] = seed_values
             seed_x = x_coords[idx].unsqueeze(0).repeat(b)
             seed_y = y_coords[idx].unsqueeze(0).repeat(b)
-        elif self.cfg.initialize == "circle":
-            seed_values = torch.ones(b, self.initialize_length, device=x.device)
-            cent_y, cent_x = h // 2, w // 2
-            y_indices, x_indices = np.ogrid[:h, :w]
-            radius = min(h, w) // 2
-            mask = ((x_indices - cent_x) ** 2 + (y_indices - cent_y) ** 2) <= radius**2
-            x0[:, self.initialize_slice, mask] = seed_values.unsqueeze(-1)
-        elif self.cfg.initialize == "autoencode":
-            seed_pos_heatmap = self.seed_pos_encoder(x)
-            seed_coords = soft_argmax_2d(seed_pos_heatmap)
-
-            seed_values = self.seed_vec_encoder(x)
-            seed_values = torch.mean(seed_values, dim=(2, 3))
-            seed_base = torch.ones(b, self.initialize_length - 1, device=x.device)
-            seed_values = seed_values + seed_base
-            seed_values = seed_values.unsqueeze(1)
-
-            seed_alpha = torch.ones(b, 1, device=x.device)
-            seed_alpha = seed_alpha.unsqueeze(1)
-
-            start = (
-                self.initialize_slice.start + 1
-                if self.initialize_slice.start is not None
-                else 1
-            )
-            stop = self.initialize_slice.stop
-            x0_seed = plant_seed_differentiably(
-                feature_map=x0[:, slice(start, stop), ...],
-                seed_coords=seed_coords,
-                seed_values=seed_values,
-                sigma=1.0,
-            )
-            x0_seed = x0_seed / torch.max(x0_seed)
-            x0_alpha = plant_seed_differentiably(
-                feature_map=x0[:, slice(0, 1), ...],
-                seed_coords=seed_coords,
-                seed_values=seed_alpha,
-                sigma=1.0,
-            )
-
-            x0 = torch.cat([x0_seed, x0_alpha], dim=1)
-
-            seed_x = seed_coords[:, :, 0].squeeze(1)
-            seed_y = seed_coords[:, :, 1].squeeze(1)
         else:
             raise ValueError(f"Unknown initialize method: {self.cfg.initialize}")
 
@@ -193,12 +125,15 @@ class CAModel(torch.nn.Module):
     def loss_f(self, x: torch.Tensor, pad_target: torch.Tensor) -> torch.Tensor:
 
         pheno = self.express(x)
-        alpha = self.life(x)
-        x = torch.cat([pheno, alpha], dim=1)
 
-        batch_pad_target = pad_target.expand(x.shape[0], *pad_target.shape[1:])
-
-        return F.mse_loss(x, batch_pad_target, reduction="mean")
+        if self.cfg.lifeless:
+            x = pheno
+            pad_target = pad_target[:, : pheno.shape[1], :, :]
+            return F.mse_loss(x, pad_target, reduction="mean")
+        else:
+            alpha = self.life(x)
+            x = torch.cat([pheno, alpha], dim=1)
+            return F.mse_loss(x, pad_target, reduction="mean")
 
     def perceive(self, x: torch.Tensor, angle: float = 0.0):
 
@@ -213,8 +148,11 @@ class CAModel(torch.nn.Module):
         x: torch.Tensor,
         fire_rate: Optional[float] = None,
         angle: float = 0.0,
-        step_size: float = 1.0,
+        step_size: Optional[torch.Tensor] = None,
     ):
+
+        if step_size is None:
+            step_size = self.step_size(x)
 
         pre_life_mask = self.get_living_mask(x)
 
@@ -230,6 +168,89 @@ class CAModel(torch.nn.Module):
         life_mask = pre_life_mask & post_life_mask
 
         return x * life_mask.to(torch.float32)
+
+
+class AutomatonAutoencoder(Automaton):
+
+    def __init__(self, cfg: CAConfig):
+
+        self.seed_pos_encoder = torch.nn.Sequential(
+            torch.nn.Conv2d(
+                self.cfg.color_channel_n + 1, 8, kernel_size=3, stride=1, padding=1
+            ),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(8, 1, kernel_size=3, stride=1, padding=1),
+            torch.nn.ReLU(),
+        )
+        print(f"built seed position encoder: {count_parameters(self.seed_pos_encoder)}")
+
+        self.seed_vec_encoder = torch.nn.Sequential(
+            torch.nn.Conv2d(
+                self.cfg.color_channel_n + 1, 8, kernel_size=3, stride=1, padding=1
+            ),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(
+                8, self.initialize_length - 1, kernel_size=3, stride=1, padding=1
+            ),
+            torch.nn.ReLU(),
+        )
+        print(f"built seed vector encoder: {count_parameters(self.seed_pos_encoder)}")
+
+        if cfg.learn_step_size:
+            self.step_size = torch.nn.Sequential(
+                torch.nn.Conv2d(self.cfg.channel_n, 8, kernel_size=1),
+                torch.nn.ReLU(),
+                torch.nn.Conv2d(8, 1, kernel_size=1),
+                torch.nn.ReLU(),
+            )
+            print(f"built step size encoder: {count_parameters(self.step_size)}")
+        else:
+            self.step_size = lambda x: torch.tensor(self.cfg.step_size, device=x.device)
+
+    def build_seed(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        b, _, h, w = x.shape
+        x0 = torch.zeros(b, self.cfg.channel_n, h, w, device=x.device)
+        seed_pos_heatmap = self.seed_pos_encoder(x)
+        seed_coords = soft_argmax_2d(seed_pos_heatmap)
+
+        seed_values = self.seed_vec_encoder(x)
+        seed_values = torch.mean(seed_values, dim=(2, 3))
+        seed_base = torch.ones(b, self.initialize_length - 1, device=x.device)
+        seed_values = seed_values + seed_base
+        seed_values = seed_values.unsqueeze(1)
+
+        seed_alpha = torch.ones(b, 1, device=x.device)
+        seed_alpha = seed_alpha.unsqueeze(1)
+
+        start = (
+            self.initialize_slice.start + 1
+            if self.initialize_slice.start is not None
+            else 1
+        )
+        stop = self.initialize_slice.stop
+        x0_seed = plant_seed_differentiably(
+            feature_map=x0[:, slice(start, stop), ...],
+            seed_coords=seed_coords,
+            seed_values=seed_values,
+            sigma=1.0,
+        )
+        x0_seed = x0_seed / torch.max(x0_seed)
+        x0_alpha = plant_seed_differentiably(
+            feature_map=x0[:, slice(0, 1), ...],
+            seed_coords=seed_coords,
+            seed_values=seed_alpha,
+            sigma=1.0,
+        )
+
+        x0 = torch.cat([x0_seed, x0_alpha], dim=1)
+
+        seed_x = seed_coords[:, :, 0].squeeze(1)
+        seed_y = seed_coords[:, :, 1].squeeze(1)
+
+        return x0, seed_values, seed_x, seed_y
 
 
 def soft_argmax_2d(heatmaps: torch.Tensor) -> torch.Tensor:
@@ -263,6 +284,13 @@ def soft_argmax_2d(heatmaps: torch.Tensor) -> torch.Tensor:
 
     coords = torch.stack([exp_x, exp_y], dim=-1)  # (B, C, 2)
     return coords
+
+
+def always_alive(x: torch.Tensor) -> torch.Tensor:
+    """
+    Always return True for all cells.
+    """
+    return torch.ones_like(x[:, :1, :, :], dtype=torch.float32)
 
 
 def plant_seed_differentiably(

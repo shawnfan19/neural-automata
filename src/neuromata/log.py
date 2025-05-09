@@ -8,7 +8,7 @@ import PIL.Image as Image
 import torch
 import wandb
 
-from neuromata.model import CAModel
+from neuromata.model import Automaton
 
 
 @dataclass
@@ -27,7 +27,7 @@ class Logger:
     def __init__(
         self,
         cfg: LogConfig,
-        model: CAModel,
+        model: Automaton,
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler.LambdaLR,
     ):

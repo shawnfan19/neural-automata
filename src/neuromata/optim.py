@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from functools import partial
+from typing import Optional
 
 import torch
 
@@ -10,7 +11,8 @@ class OptimizerConfig:
     epsilon: float = 1e-8
     beta1: float = 0.9
     beta2: float = 0.95
-
+    layerwise_norm: bool = True
+    grad_clip: Optional[float] = None
     scheduler: str = "piecewise-constant"
     scheduler_params: dict = field(default_factory=dict)
 

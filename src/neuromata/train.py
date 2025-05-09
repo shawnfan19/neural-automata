@@ -7,7 +7,7 @@ from omegaconf import OmegaConf
 from neuromata.data import DataConfig
 from neuromata.data.mnist import load_mnist
 from neuromata.log import LogConfig, Logger, collage
-from neuromata.model import CAConfig, CAModel
+from neuromata.model import Automaton, CAConfig
 from neuromata.optim import OptimizerConfig, configure_optimizer
 from neuromata.utils.image import (
     to_grayscale,
@@ -22,14 +22,16 @@ class TrainConfig:
     batch_size: int = 8
     device: str = "mps"
     n_steps: int = 8000
+    growth_iter: int = 64
     data: DataConfig = field(default_factory=DataConfig)
     model: CAConfig = field(default_factory=CAConfig)
     optim: OptimizerConfig = field(default_factory=OptimizerConfig)
     log: LogConfig = field(default_factory=LogConfig)
 
 
-def eval_step(model: CAModel, x: torch.Tensor, iter_n: int):
+def eval_step(model: Automaton, x: torch.Tensor, iter_n: int):
 
+    x_lst = []
     x_pheno_lst = []
     x_alpha_lst = []
 
@@ -39,15 +41,16 @@ def eval_step(model: CAModel, x: torch.Tensor, iter_n: int):
         pheno = model.express(x)
         alpha = model.life(x)
 
+        x_lst.append(x.squeeze().detach().cpu().numpy())
         x_pheno_lst.append(pheno.squeeze().detach().cpu().numpy())
         x_alpha_lst.append(alpha.squeeze().detach().cpu().numpy())
 
-    return x_pheno_lst, x_alpha_lst
+    return x_lst, x_pheno_lst, x_alpha_lst
 
 
 def train(cfg: TrainConfig):
 
-    ca = CAModel(cfg=cfg.model)
+    ca = Automaton(cfg=cfg.model)
     ca.to(cfg.device)
 
     optimizer, scheduler = configure_optimizer(model=ca, cfg=cfg.optim)
@@ -68,7 +71,7 @@ def train(cfg: TrainConfig):
         x0, seed_values, seed_x, seed_y = ca.build_seed(x_target)
         x = x0
 
-        growth_iter = np.random.randint(low=64, high=96)
+        growth_iter = cfg.growth_iter
         for _ in np.arange(growth_iter):
             x = ca(x)
 
@@ -77,11 +80,18 @@ def train(cfg: TrainConfig):
         optimizer.zero_grad()
         loss.backward()
         logger.log_grad()
-        for param in ca.parameters():
-            if param.grad is not None:
-                grad = param.grad
-                norm = grad.norm() + 1e-8
-                param.grad = grad / norm
+
+        if cfg.optim.layerwise_norm:
+            for param in ca.parameters():
+                if param.grad is not None:
+                    grad = param.grad
+                    norm = grad.norm() + 1e-8
+                    param.grad = grad / norm
+
+        if cfg.optim.grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_(
+                ca.parameters(), max_norm=cfg.optim.grad_clip
+            )
 
         optimizer.step()
         scheduler.step()
@@ -116,7 +126,7 @@ def train(cfg: TrainConfig):
                 tensor=seed_values.squeeze(1).detach().cpu().numpy(),
                 name="seed_tensor",
             )
-            x_pheno_lst, x_alpha_lst = eval_step(
+            x_lst, x_pheno_lst, x_alpha_lst = eval_step(
                 model=ca,
                 x=x0[[0], ...],
                 iter_n=growth_iter,
@@ -135,6 +145,14 @@ def train(cfg: TrainConfig):
                 name="evo_alpha",
                 caption="evo_alpha_%04d" % step_i,
             )
+            for i in range(cfg.model.channel_n):
+                x_i_lst = [to_grayscale(x[i, :, :]) for x in x_lst]
+                evo_i = to_pil(collage(x_i_lst, ncol=batch_size))
+                logger.log_image(
+                    img=evo_i,
+                    name="evo_%d" % i,
+                    caption="evo_%d_%04d" % (i, step_i),
+                )
 
         logger.log_metrics(
             step=step_i,
