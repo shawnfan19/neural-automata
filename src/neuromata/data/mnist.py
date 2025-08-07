@@ -28,6 +28,9 @@ class MNISTDataset:
 
 
 def load_mnist(cfg: DataConfig):
+    """
+    load a single mnist image
+    """
 
     rng = np.random.default_rng(seed=cfg.seed)
 

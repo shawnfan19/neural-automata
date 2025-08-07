@@ -170,7 +170,7 @@ class Automaton(torch.nn.Module):
         return x * life_mask.to(torch.float32)
 
 
-class AutomatonAutoencoder(Automaton):
+class Autoencodon(Automaton):
 
     def __init__(self, cfg: CAConfig):
 
