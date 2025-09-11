@@ -1,8 +1,5 @@
-from dataclasses import dataclass, field
-from functools import partial
-from typing import Literal, Optional
+from typing import Literal
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from anndata import AnnData
@@ -25,12 +22,12 @@ from torch.distributions import NegativeBinomial, Normal
 from torch.distributions import kl_divergence as kl
 
 
-class MLP(torch.nn.Module):
+class MyNeuralNet(torch.nn.Module):
     def __init__(
         self,
         n_input: int,
         n_output: int,
-        link_var: Literal["exp", "none", "softmax"],
+        link_var: Literal["exp", "none", "softmax", "softplus"],
     ):
         """Encodes data of ``n_input`` dimensions into a space of ``n_output`` dimensions.
 
@@ -56,6 +53,8 @@ class MLP(torch.nn.Module):
             self.transformation = torch.nn.Softmax(dim=-1)
         elif link_var == "exp":
             self.transformation = torch.exp
+        elif link_var == "softplus":
+            self.transformation = F.softplus
 
     def forward(self, x: torch.Tensor):
         output = self.neural_net(x)
@@ -64,34 +63,19 @@ class MLP(torch.nn.Module):
         return output
 
 
-def percept(X: torch.Tensor):
+class MyModule(BaseModuleClass):
+    """Skeleton Variational auto-encoder model.
 
-    # batch_size, height, width, hidden = X.shape
+    Here we implement a basic version of scVI's underlying VAE [Lopez18]_.
+    This implementation is for instructional purposes only.
 
-    X180 = torch.roll(X, shifts=2, dims=2)
-    X180[..., :, :2] = 0
-
-    X000 = torch.roll(X, shifts=-2, dims=2)
-    X000[..., :, -2:] = 0
-
-    X060 = torch.roll(X, shifts=(-1, -1), dims=(1, 2))
-    X060[..., -1:, -1:] = 0
-
-    X120 = torch.roll(X, shifts=(-1, 1), dims=(1, 2))
-    X120[..., -1:, :1] = 0
-
-    X240 = torch.roll(X, shifts=(1, 1), dims=(1, 2))
-    X240[..., :1, :1] = 0
-
-    X300 = torch.roll(X, shifts=(1, -1), dims=(1, 2))
-    X300[..., :1, -1:] = 0
-
-    X_percept = torch.cat([X, X000, X060, X120, X180, X240, X300], dim=-1)
-
-    return X_percept
-
-
-class NicheAutomaton(BaseModuleClass):
+    Parameters
+    ----------
+    n_input
+        Number of input genes.
+    n_latent
+        Dimensionality of the latent space.
+    """
 
     def __init__(
         self,
@@ -99,20 +83,15 @@ class NicheAutomaton(BaseModuleClass):
         n_latent: int = 10,
     ):
         super().__init__()
+        # in the init, we create the parameters of our elementary stochastic computation unit.
 
-        self.n_latent = n_latent
-        n_hidden = n_latent * 7
-        self.nca = torch.nn.Sequential(
-            torch.nn.Conv2d(n_hidden, n_latent, kernel_size=1, bias=False),
-            torch.nn.ReLU(),
-            torch.nn.Conv2d(n_latent, n_latent, kernel_size=1, bias=False),
-        )
-
-        self.embed = torch.nn.Linear(n_input, n_latent)
-        self.mean_encoder = torch.nn.Linear(n_latent, n_latent)
-        self.var_encoder = torch.nn.Linear(n_latent, n_latent)
-        self.decoder = MLP(n_latent, n_input, "softmax")
+        # First, we setup the parameters of the generative model
+        self.decoder = MyNeuralNet(n_latent, n_input, "softmax")
         self.log_theta = torch.nn.Parameter(torch.randn(n_input))
+
+        # Second, we setup the parameters of the variational distribution
+        self.mean_encoder = MyNeuralNet(n_input, n_latent, "none")
+        self.var_encoder = MyNeuralNet(n_input, n_latent, "softplus")
 
     def _get_inference_input(self, tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:  # type: ignore
         """Parse the dictionary to get appropriate args"""
@@ -120,21 +99,19 @@ class NicheAutomaton(BaseModuleClass):
         return {"x": tensors[REGISTRY_KEYS.X_KEY]}
 
     @auto_move_data
-    def inference(self, x: torch.Tensor, iter: int = 2) -> dict[str, torch.Tensor]:
+    def inference(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        """
+        High level inference method.
 
+        Runs the inference (encoder) model.
+        """
+        # log the input to the variational distribution for numerical stability
         x_ = torch.log1p(x)
-        x_ = self.embed(x_)
-
-        # x_ = torch.permute(x_, (0, 3, 1, 2))
-        for _ in range(iter):
-            x_ = percept(x_)
-            x_ = torch.permute(x_, (0, 3, 1, 2))
-            x_ = self.nca(x_)
-            x_ = torch.permute(x_, (0, 2, 3, 1))
-
+        # get variational parameters via the encoder networks
         qz_m = self.mean_encoder(x_)
-        qz_v = torch.exp(self.var_encoder(x_))
-
+        qz_v = self.var_encoder(x_)
+        # get one sample to feed to the generative model
+        # under the hood here is the Reparametrization trick (Rsample)
         z = Normal(qz_m, torch.sqrt(qz_v)).rsample()
 
         return {"qz_m": qz_m, "qz_v": qz_v, "z": z}
@@ -143,19 +120,23 @@ class NicheAutomaton(BaseModuleClass):
         self,
         tensors: dict[str, torch.Tensor],
         inference_outputs: dict[str, torch.Tensor],
+        **kwargs,
     ) -> dict[str, torch.Tensor]:  # type: ignore
         return {
             "z": inference_outputs["z"],
-            "library": torch.sum(tensors[REGISTRY_KEYS.X_KEY], dim=-1, keepdim=True),
+            "library": torch.sum(tensors[REGISTRY_KEYS.X_KEY], dim=1, keepdim=True),
         }
 
     @auto_move_data
     def generative(
         self, z: torch.Tensor, library: torch.Tensor
     ) -> dict[str, torch.Tensor]:
-
+        """Runs the generative model."""
+        # get the "normalized" mean of the negative binomial
         px_scale = self.decoder(z)
+        # get the mean of the negative binomial
         px_rate = library * px_scale
+        # get the dispersion parameter
         theta = torch.exp(self.log_theta)
 
         return {
@@ -194,7 +175,7 @@ class NicheAutomaton(BaseModuleClass):
         # term 2
         prior_dist = Normal(torch.zeros_like(qz_m), torch.ones_like(qz_v))
         var_post_dist = Normal(qz_m, torch.sqrt(qz_v))
-        kl_divergence = kl(var_post_dist, prior_dist).sum(dim=-1)
+        kl_divergence = kl(var_post_dist, prior_dist).sum(dim=1)
 
         elbo = log_lik - kl_divergence
         loss = torch.mean(-elbo)
@@ -206,7 +187,8 @@ class NicheAutomaton(BaseModuleClass):
         )
 
 
-class SCAutomaton(UnsupervisedTrainingMixin):
+class SCVI(UnsupervisedTrainingMixin):
+    """single-cell Variational Inference [Lopez18]_."""
 
     def __init__(
         self,
@@ -215,11 +197,12 @@ class SCAutomaton(UnsupervisedTrainingMixin):
         **model_kwargs,
     ):
         super().__init__()
-        self.module = NicheAutomaton(
+
+        self.module = MyModule(
             n_input=n_input,
             n_latent=n_latent,
             **model_kwargs,
         )
         self._model_summary_string = (
-            f"SCVI Automaton Model with the following params: \nn_latent: {n_latent}"
+            f"SCVI Model with the following params: \nn_latent: {n_latent}"
         )
