@@ -1,6 +1,4 @@
-from dataclasses import dataclass, field
-from functools import partial
-from typing import Literal, Optional
+from typing import Literal, Optional, Sequence
 
 import numpy as np
 import torch
@@ -9,11 +7,8 @@ from anndata import AnnData
 from scvi import REGISTRY_KEYS
 from scvi.data import AnnDataManager
 from scvi.data.fields import (
-    CategoricalJointObsField,
     CategoricalObsField,
     LayerField,
-    NumericalJointObsField,
-    NumericalObsField,
 )
 from scvi.model.base import BaseModelClass, UnsupervisedTrainingMixin
 from scvi.module.base import (
@@ -206,15 +201,16 @@ class NicheAutomaton(BaseModuleClass):
         )
 
 
-class SCAutomaton(UnsupervisedTrainingMixin):
+class SCAutomaton(UnsupervisedTrainingMixin, BaseModelClass):
 
     def __init__(
         self,
+        adata,
         n_input: int,
         n_latent: int = 10,
         **model_kwargs,
     ):
-        super().__init__()
+        super().__init__(adata)
         self.module = NicheAutomaton(
             n_input=n_input,
             n_latent=n_latent,
@@ -223,3 +219,69 @@ class SCAutomaton(UnsupervisedTrainingMixin):
         self._model_summary_string = (
             f"SCVI Automaton Model with the following params: \nn_latent: {n_latent}"
         )
+
+    @classmethod
+    def setup_anndata(
+        cls,
+        adata: AnnData,
+        batch_key: Optional[str] = None,
+        layer: Optional[str] = None,
+        **kwargs,
+    ):
+        setup_method_args = cls._get_setup_method_args(**locals())
+        anndata_fields = [
+            LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
+            CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
+        ]
+        adata_manager = AnnDataManager(
+            fields=anndata_fields, setup_method_args=setup_method_args
+        )
+        adata_manager.register_fields(adata, **kwargs)
+        cls.register_manager(adata_manager)
+
+    @torch.no_grad()
+    def get_latent_representation(
+        self,
+        adata: Optional[AnnData] = None,
+        indices: Optional[Sequence[int]] = None,
+        batch_size: Optional[int] = None,
+    ) -> np.ndarray:
+        r"""
+        Return the latent representation for each cell.
+
+        Parameters
+        ----------
+        adata
+            AnnData object with equivalent structure to initial AnnData. If `None`, defaults to the
+            AnnData object used to initialize the model.
+        indices
+            Indices of cells in adata to use. If `None`, all cells are used.
+        batch_size
+            Minibatch size for data loading into model. Defaults to `scvi.settings.batch_size`.
+
+        Returns
+        -------
+        latent_representation : np.ndarray
+            Low-dimensional representation for each cell
+        """
+        if self.is_trained_ is False:
+            raise RuntimeError("Please train the model first.")
+
+        adata = self._validate_anndata(adata)
+        X = adata.X.toarray()
+        X = torch.from_numpy(X)
+        max_rows = adata.obs["array_row"].max() + 1
+        max_cols = adata.obs["array_col"].max() + 1
+
+        X_niche = torch.zeros((max_rows, max_cols, X.shape[1]))
+        y_coords = adata.obs["array_row"].to_numpy()
+        x_coords = adata.obs["array_col"].to_numpy()
+        X_niche[y_coords, x_coords] = X
+        tensors = {REGISTRY_KEYS.X_KEY: X_niche.unsqueeze(0)}
+        inference_inputs = self.module._get_inference_input(tensors)
+        outputs = self.module.inference(**inference_inputs)
+        qz_m = outputs["qz_m"].squeeze(0).cpu().numpy()
+
+        latent = qz_m[adata.obs["array_row"], adata.obs["array_col"], :]
+
+        return latent

@@ -153,3 +153,7 @@ third-party
 
 # dkfz
 logs
+checkpoints
+
+.env
+.envrc

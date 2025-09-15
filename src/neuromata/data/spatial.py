@@ -5,11 +5,17 @@ from scvi import REGISTRY_KEYS
 from torch.utils.data import DataLoader, Dataset
 
 
-class SpatialDataset(Dataset):
+class SquidpyDataset(Dataset):
 
-    def __init__(self, spatial: bool = False):
-        self.img = sq.datasets.visium_hne_image()
-        self.adata = sq.datasets.visium_hne_adata()
+    def __init__(self, spatial: bool = False, dataset: str = "visium-hne"):
+
+        if dataset == "visium-hne":
+            self.img = sq.datasets.visium_hne_image()
+            adata = sq.datasets.visium_hne_adata()
+            adata.X = adata.raw.X
+            self.adata = adata
+        else:
+            raise NotImplementedError
         self.spatial = spatial
 
     def __len__(self):
@@ -19,7 +25,7 @@ class SpatialDataset(Dataset):
 
     def __getitem__(self, idx):
         if self.spatial:
-            X = self.adata.raw.X.toarray()
+            X = self.adata.X.toarray()
             X = torch.from_numpy(X)
             max_rows = self.adata.obs["array_row"].max() + 1
             max_cols = self.adata.obs["array_col"].max() + 1
@@ -30,29 +36,46 @@ class SpatialDataset(Dataset):
             X_niche[y_coords, x_coords] = X
             return {REGISTRY_KEYS.X_KEY: X_niche}
         else:
-            cell = self.adata.raw.X[idx, :].toarray().ravel()
-            return {REGISTRY_KEYS.X_KEY: torch.tensor(cell)}
+            cell = self.adata.X[idx, :].toarray().ravel()
+            return {REGISTRY_KEYS.X_KEY: torch.Tensor(cell)}
 
 
 class SpatialDataModule(L.LightningDataModule):
 
-    def __init__(self, batch_size: int, spatial: bool = False):
+    def __init__(
+        self, dataset: str, batch_size: int | None = None, spatial: bool = False
+    ):
         super().__init__()
+        self.dataset = dataset
         self.batch_size = batch_size
         self.spatial = spatial
 
-    def setup(self, stage):
-        self.dataset = SpatialDataset(spatial=self.spatial)
-        return None
+    @property
+    def anndata(self):
+        return self.squidpy_dataset.adata
+
+    @property
+    def n_var(self):
+        return self.squidpy_dataset.adata.shape[1]
+
+    def prepare_data(self):
+        self.squidpy_dataset = SquidpyDataset(
+            dataset=self.dataset, spatial=self.spatial
+        )
+        if self.batch_size is None:
+            self.batch_size = self.squidpy_dataset.adata.shape[0]
+            print(f"batch size (inferred): {self.batch_size}")
 
     def train_dataloader(self):
-        return DataLoader(self.dataset, batch_size=self.batch_size)
+        return DataLoader(self.squidpy_dataset, batch_size=self.batch_size)
 
     def val_dataloader(self):
-        return DataLoader(self.dataset, batch_size=self.batch_size)
+        return DataLoader(self.squidpy_dataset, batch_size=self.batch_size)
 
     def test_dataloader(self):
-        return DataLoader(self.dataset, batch_size=self.batch_size)
+        return DataLoader(self.squidpy_dataset, batch_size=self.batch_size)
 
     def predict_dataloader(self):
-        return DataLoader(self.dataset, batch_size=self.batch_size)
+        return DataLoader(
+            self.squidpy_dataset, batch_size=self.batch_size, shuffle=False
+        )
